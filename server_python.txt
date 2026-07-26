@@ -1,0 +1,499 @@
+import asyncio
+import json
+import ssl
+import time
+import itertools
+import logging
+from datetime import datetime, timezone
+from typing import Dict, Set
+from websockets.server import ServerConnection
+import websockets
+from ocpp.routing import on
+from ocpp.v16 import ChargePoint as Cp
+from ocpp.v16 import call, call_result
+from ocpp.v16.enums import (
+    Action,
+    RegistrationStatus,
+    AuthorizationStatus,
+    ChargePointStatus,
+)
+# -------------------------------------------------
+# Logging
+# -------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+charger_logger = logging.getLogger("Charger")
+frontend_logger = logging.getLogger("Frontend")
+# -------------------------------------------------
+# Globals
+# -------------------------------------------------
+chargers: Dict[str, "ChargePoint"] = {}
+frontend_clients: Set[ServerConnection] = set()
+START_ALLOWED_STATES = {
+    ChargePointStatus.available,
+    ChargePointStatus.preparing,
+}
+# -------------------------------------------------
+# ChargePoint
+# -------------------------------------------------
+class ChargePoint(Cp):
+    def __init__(self, id, ws):
+        super().__init__(id, ws)
+        self.id = id
+        self.session_meter = {}
+        self.tx_counter = itertools.count(1)
+        self.active_tx: Dict[int, int] = {}              # connectorId -> txId
+        self.connector_state: Dict[int, ChargePointStatus] = {}
+        self.known_connectors: Set[int] = set()
+        # per-connector pending START
+        self.pending_remote_start: Dict[int, float] = {}
+    # -------------------------------------------------
+    # Frontend push helper
+    # -------------------------------------------------
+    async def push(self, payload: dict):
+        payload["charger_id"] = self.id
+        msg = json.dumps(payload)
+        for ws in list(frontend_clients):
+            try:
+                await ws.send(msg)
+            except Exception:
+                frontend_clients.discard(ws)
+        charger_logger.info(f"PUSH → {payload}")
+    def snapshot(self):
+        connectors = {}
+        for cid in self.known_connectors:
+            session = self.session_meter.get(cid)
+            tx_id = self.active_tx.get(cid)
+            transaction = None
+            if tx_id and session:
+                energy_start = session.get("start", {}).get("energy", 0)
+                energy_last = session.get("last", {}).get("energy", 0)
+                transaction = {
+                    "transaction_id": tx_id,
+                    "energy_kwh": round(energy_last - energy_start, 3),
+                    "elapsed_sec": int(time.monotonic() - session["started_at"]),
+                }
+                soc_start = session.get("soc_start")
+                soc_last = session.get("soc_last")
+                if soc_start is not None and soc_last is not None:
+                    transaction.update({
+                        "soc_start": soc_start,
+                        "soc_end": soc_last,
+                        "soc_delta": soc_last - soc_start,
+                    })
+            connectors[cid] = {
+                "status": self.connector_state.get(cid),
+                "transaction": transaction,
+            }
+        return {
+            "charger_id": self.id,
+            "connectors": connectors,
+        }
+    # -------------------------------------------------
+    # Availability check
+    # -------------------------------------------------
+    def can_start_on_connector(self, connector_id: int):
+        if connector_id == 0:
+            return False, "invalid_connector"
+        status = self.connector_state.get(connector_id)
+        if status is None:
+            return False, "unknown_connector"
+        if connector_id in self.active_tx:
+            return False, "transaction_active"
+        if status not in START_ALLOWED_STATES:
+            return False, f"connector_{status}"
+        if connector_id in self.pending_remote_start:
+            return False, "already_pending"
+        return True, "ok"
+    # -------------------------------------------------
+    # Boot
+    # -------------------------------------------------
+    @on(Action.boot_notification)
+    async def on_boot(self, charge_point_vendor, charge_point_model, **kw):
+        await self.push({
+            "type": "boot",
+            "vendor": charge_point_vendor,
+            "model": charge_point_model,
+        })
+        return call_result.BootNotification(
+            current_time=datetime.now(timezone.utc).isoformat(),
+            interval=30,
+            status=RegistrationStatus.accepted,
+        )
+    # -------------------------------------------------
+    # Heartbeat
+    # -------------------------------------------------
+    @on(Action.heartbeat)
+    async def on_heartbeat(self):
+        await self.push({
+            "type": "heartbeat",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        return call_result.Heartbeat(
+            current_time=datetime.now(timezone.utc).isoformat()
+        )
+    # -------------------------------------------------
+    # Authorize
+    # -------------------------------------------------
+    @on(Action.authorize)
+    async def on_authorize(self, id_tag, **kw):
+        return call_result.Authorize(
+            id_tag_info={
+                "status": AuthorizationStatus.accepted,
+                "expiryDate": "2035-01-01T00:00:00Z",
+            }
+        )
+    # -------------------------------------------------
+    # Build RemoteStart
+    # -------------------------------------------------
+    def build_remote_start(self, connector_id: int, with_connector: bool):
+        if with_connector:
+            return call.RemoteStartTransaction(
+                id_tag="APP_USER",
+                connector_id=connector_id,
+            )
+        return call.RemoteStartTransaction(id_tag="APP_USER")
+    # -------------------------------------------------
+    # StatusNotification (core state machine)
+    # -------------------------------------------------
+    @on(Action.status_notification)
+    async def on_status(self, connector_id, status, error_code, **kw):
+        if connector_id == 0:
+            # Optional: store global charger state somewhere else
+            await self.push({
+                "type": "charger_status",
+                "status": status,
+                "error": error_code,
+            })
+            return call_result.StatusNotification(
+                status=status,
+                error_code=error_code,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        self.known_connectors.add(connector_id)
+        prev = self.connector_state.get(connector_id)
+        self.connector_state[connector_id] = status
+        await self.push({
+            "type": "status_transition",
+            "connector_id": connector_id,
+            "from": prev,
+            "to": status,
+            "error": error_code,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        # Expire pending STARTs (30s)
+        now = time.monotonic()
+        expired = [
+            cid for cid, ts in self.pending_remote_start.items()
+            if now - ts > 30
+        ]
+        for cid in expired:
+            del self.pending_remote_start[cid]
+            await self.push({
+                "type": "command_result",
+                "command": "START",
+                "connector_id": cid,
+                "status": "timeout",
+            })
+        # Trigger START only for this connector
+        if (
+            connector_id in self.pending_remote_start
+            and status == ChargePointStatus.preparing
+        ):
+            del self.pending_remote_start[connector_id]
+            allowed, reason = self.can_start_on_connector(connector_id)
+            if not allowed:
+                await self.push({
+                    "type": "command_result",
+                    "command": "START",
+                    "connector_id": connector_id,
+                    "status": "aborted",
+                    "reason": reason,
+                })
+            else:
+                await asyncio.sleep(1.5)  # EV handshake buffer
+                multi = len(self.known_connectors) > 1
+                await self.push({
+                    "type": "command_sent",
+                    "command": "START",
+                    "connector_id": connector_id,
+                })
+                req = self.build_remote_start(connector_id, with_connector=multi)
+                resp = await self.call(req)
+                if resp.status != "Accepted":
+                    req = self.build_remote_start(
+                        connector_id, with_connector=not multi
+                    )
+                    resp = await self.call(req)
+                await self.push({
+                    "type": "command_result",
+                    "command": "START",
+                    "connector_id": connector_id,
+                    "status": resp.status,
+                })
+        return call_result.StatusNotification(
+            status=status,
+            error_code=error_code,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+    # -------------------------------------------------
+    # StartTransaction
+    # -------------------------------------------------
+    @on(Action.start_transaction)
+    async def on_start_tx(self, connector_id, id_tag, meter_start, timestamp, **kw):
+        tx_id = next(self.tx_counter)
+        self.active_tx[connector_id] = tx_id
+        self.session_meter[connector_id] = {
+            "started_at": time.monotonic(),
+            "last": {},
+            "start": {},
+            "soc_start": None,
+            "soc_last": None,
+        }
+        await self.push({
+            "type": "transaction_started",
+            "connector_id": connector_id,
+            "transaction_id": tx_id,
+        })
+        return call_result.StartTransaction(
+            transaction_id=tx_id,
+            id_tag_info={"status": AuthorizationStatus.accepted},
+        )
+    # -------------------------------------------------
+    # MeterValues
+    # -------------------------------------------------
+    @on(Action.meter_values)
+    async def on_meter(self, connector_id, meter_value, **kw):
+        meter = {}
+        NUMERIC_KEYS = {"energy", "power", "soc", "voltage", "current"}
+        for mv in meter_value:
+            sampled_values = mv.get("sampledValue") or mv.get("sampled_value")
+            if not sampled_values:
+                continue
+            meter["timestamp"] = mv.get("timestamp")
+            for s in sampled_values:
+                meas = s.get("measurand")
+                try:
+                    val = float(s.get("value", 0))
+                except (TypeError, ValueError):
+                    continue
+                if meas == "Energy.Active.Import.Register":
+                    meter["energy"] = round(val / 1000, 3)   # Wh → kWh
+                elif meas == "Power.Active.Import":
+                    meter["power"] = round(val / 1000, 2)    # W → kW
+                elif meas == "SoC":
+                    meter["soc"] = int(val)
+                elif meas == "Voltage":
+                    meter["voltage"] = round(val, 1)
+                elif meas == "Current.Import":
+                    meter["current"] = round(val, 1)
+        if not meter:
+            return call_result.MeterValues()
+        session = self.session_meter.get(connector_id)
+        soc = meter.get("soc")
+        delta = {}
+        if session:
+            last = session["last"]
+            start = session["start"]
+            if soc is not None:
+                if session["soc_start"] is None:
+                    session["soc_start"] = soc
+                session["soc_last"] = soc
+            for k, v in meter.items():
+                if k not in start:
+                    start[k] = v
+                if k in last and k in NUMERIC_KEYS:
+                    delta[k] = round(v - last[k], 3)
+            elapsed = time.monotonic() - session["started_at"]
+            delta["elapsed_sec"] = int(elapsed)
+            session["last"] = meter.copy()
+        payload = {
+            "type": "meter",
+            "connector_id": connector_id,
+            "meter": meter,
+        }
+        if session:
+            payload["delta"] = delta
+            payload["session"] = {
+                "energy": round(
+                    meter.get("energy", 0) - session["start"].get("energy", 0),
+                    3,
+                ),
+                "elapsed_sec": int(time.monotonic() - session["started_at"]),
+            }
+            if session["soc_start"] is not None and session["soc_last"] is not None:
+                payload["session"].update({
+                    "soc_start": session["soc_start"],
+                    "soc_end": session["soc_last"],
+                    "soc_delta": session["soc_last"] - session["soc_start"],
+                })
+        await self.push(payload)
+        return call_result.MeterValues()
+    # -------------------------------------------------
+    # StopTransaction
+    # -------------------------------------------------
+    @on(Action.stop_transaction)
+    async def on_stop_tx(self, transaction_id, meter_stop, timestamp, **kw):
+        connector_id = next(
+            (cid for cid, tx in self.active_tx.items() if tx == transaction_id),
+            None,
+        )
+        self.active_tx.pop(connector_id, None)
+        session = self.session_meter.pop(connector_id, None)
+        total_charge = None
+        f_soc_start = None
+        l_soc_last = None
+        if session:
+            soc_start = session.get("soc_start")
+            soc_last = session.get("soc_last")
+            if soc_start is not None and soc_last is not None:
+                f_soc_start = soc_start
+                l_soc_last = soc_last
+                total_charge = l_soc_last - f_soc_start
+        await self.push({
+            "type": "transaction_stopped",
+            "connector_id": connector_id,
+            "transaction_id": transaction_id,
+            "summary": {
+                "duration_sec": int(time.monotonic() - session["started_at"])
+                if session else None,
+                "energy_kwh":
+                    round(
+                        session["last"].get("energy", 0)
+                        - session["start"].get("energy", 0),
+                        3,
+                    ) if session else None,
+                "started_at" : f_soc_start,
+                "ended_at" : l_soc_last,
+                "total_charge" : total_charge
+            },
+        })
+        return call_result.StopTransaction(
+            id_tag_info={"status": AuthorizationStatus.accepted}
+        )
+    # -------------------------------------------------
+    # Remote STOP
+    # -------------------------------------------------
+    async def remote_stop(self, connector_id=None):
+        tx_id = (
+            self.active_tx.get(connector_id)
+            if connector_id
+            else next(iter(self.active_tx.values()), None)
+        )
+        if not tx_id:
+            await self.push({
+                "type": "command_result",
+                "command": "STOP",
+                "connector_id": connector_id,
+                "status": "no_active_transaction",
+            })
+            return
+        resp = await self.call(
+            call.RemoteStopTransaction(transaction_id=tx_id)
+        )
+        await self.push({
+            "type": "command_result",
+            "command": "STOP",
+            "connector_id": connector_id,
+            "status": resp.status,
+        })
+# -------------------------------------------------
+# WebSocket handlers
+# -------------------------------------------------
+async def charger_handler(ws):
+    cp_id = ws.request.path.strip("/")
+    cp = ChargePoint(cp_id, ws)
+    chargers[cp_id] = cp
+    charger_logger.info(f"Charger connected: {cp_id}")
+    try:
+        await cp.start()
+    finally:
+        for connector_id, tx_id in list(cp.active_tx.items()):
+            await cp.push({
+                "type": "transaction_stopped",
+                "connector_id": connector_id,
+                "transaction_id": tx_id,
+                "reason": "charger_disconnected"
+            })
+            cp.session_meter.pop(connector_id, None)
+            cp.active_tx.pop(connector_id, None)
+        chargers.pop(cp_id, None)
+        charger_logger.info(f"Charger disconnected: {cp_id}")
+async def frontend_handler(ws):
+    frontend_clients.add(ws)
+    frontend_logger.info("Frontend connected")
+    await ws.send(json.dumps({
+        "type": "hello",
+        "chargers": list(chargers.keys()),
+    }))
+    for cp in chargers.values():
+        await ws.send(json.dumps({
+            "type": "snapshot",
+            **cp.snapshot(),
+        }))
+    try:
+        async for msg in ws:
+            data = json.loads(msg)
+            cp = chargers.get(data.get("charger_id"))
+            if not cp:
+                continue
+            if data["action"] == "START":
+                cid = int(data.get("connector_id", 1))
+                allowed, reason = cp.can_start_on_connector(cid)
+                if not allowed:
+                    ...
+                    continue
+                await cp.push({
+                    "type": "command_sent",
+                    "command": "START",
+                    "connector_id": cid,
+                })
+                multi = len(cp.known_connectors) > 1
+                req = cp.build_remote_start(cid, with_connector=multi)
+                resp = await cp.call(req)
+                await cp.push({
+                    "type": "command_result",
+                    "command": "START",
+                    "connector_id": cid,
+                    "status": resp.status,
+                })
+            elif data["action"] == "STOP":
+                cid = data.get("connector_id")
+                await cp.push({
+                    "type": "command_ack",
+                    "command": "STOP",
+                    "connector_id": cid,
+                    "status": "received",
+                })
+                await cp.remote_stop(cid)
+    finally:
+        frontend_clients.discard(ws)
+        frontend_logger.info("Frontend disconnected")
+# -------------------------------------------------
+# SSL
+# -------------------------------------------------
+def create_ssl_context():
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain("fullchain.pem", "private.key")
+    ctx.load_verify_locations("ca_bundle.crt")
+    return ctx
+# -------------------------------------------------
+# Main
+# -------------------------------------------------
+async def main():
+    ssl_ctx = create_ssl_context()
+    await websockets.serve(
+        charger_handler,
+        "0.0.0.0",
+        8080,
+        subprotocols=["ocpp1.6"],
+    )
+    await websockets.serve(
+        frontend_handler,
+        "0.0.0.0",
+        6008,
+        ssl=ssl_ctx,
+    )
+    charger_logger.info("CSMS running")
+    await asyncio.Future()
+if __name__ == "__main__":
+    asyncio.run(main())

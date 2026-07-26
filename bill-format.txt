@@ -1,0 +1,238 @@
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+
+import '../../src.dart';
+
+class ReceiptBody extends StatelessWidget {
+  final ChargingSession session;
+  final GlobalKey? repaintKey;
+
+  const ReceiptBody({super.key, required this.session, this.repaintKey});
+
+  @override
+  Widget build(BuildContext context) {
+    final rateBreakdown = ChargingRates.getRateBreakdown(
+      session.energyDelivered,
+    );
+
+    final body = Container(
+      // key: repaintKey,
+      color: AppColors.kWhite,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Success Icon
+          Container(
+            width: 80,
+            height: 80,
+            decoration: BoxDecoration(
+              color: AppColors.successColor.withValues(alpha: 0.1),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.check_circle,
+              color: AppColors.successColor,
+              size: 48,
+            ),
+          ),
+          Gaps.verticalGapOf(16),
+          Text(
+            'Charging Complete!',
+            style: AppStyles.text20PxSemiBold.copyWith(
+              color: AppColors.successColor,
+            ),
+          ),
+          Gaps.verticalGapOf(8),
+          Text(
+            'Transaction ID: ${session.txnId}',
+            style: AppStyles.text12PxRegular.copyWith(color: AppColors.kGrey),
+          ),
+          Gaps.verticalGapOf(24),
+
+          CustomMaterialButton(
+            label: 'Share QR Code Payment',
+            height: 40,
+            onTap: () {
+              Utility.navigateMaterialRoute(
+                context,
+                QRPaymentScreen(amount: '1'),
+              );
+            },
+            textStyle: AppStyles.text14PxMedium,
+            radius: 45,
+          ),
+
+          // Receipt Card
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: AppColors.kWhite,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          session.stationName,
+                          style: AppStyles.text16PxSemiBold,
+                        ),
+                        Gaps.verticalGapOf(4),
+                        Text(
+                          session.connectorType,
+                          style: AppStyles.text12PxRegular.copyWith(
+                            color: AppColors.kGrey,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.successColor.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        'Completed',
+                        style: AppStyles.text12PxSemiBold.copyWith(
+                          color: AppColors.successColor,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                Gaps.verticalGapOf(20),
+                const Divider(),
+                Gaps.verticalGapOf(20),
+
+                // Session Information
+                Text('Session Information', style: AppStyles.text14PxSemiBold),
+                Gaps.verticalGapOf(12),
+                _buildDetailRow(
+                  label: 'Start Time',
+                  value: DateFormat(
+                    'MMM dd, yyyy - hh:mm a',
+                  ).format(session.startTime),
+                ),
+                _buildDetailRow(
+                  label: 'End Time',
+                  value: DateFormat(
+                    'MMM dd, yyyy - hh:mm a',
+                  ).format(session.startTime.add(session.chargingDuration)),
+                ),
+                _buildDetailRow(
+                  label: 'Duration',
+                  value: _formatDuration(session.chargingDuration),
+                ),
+                _buildDetailRow(
+                  label: 'Initial Battery',
+                  value: '${session.batteryPercentage - 37}%',
+                ),
+                _buildDetailRow(
+                  label: 'Final Battery',
+                  value: '${session.batteryPercentage}%',
+                ),
+                Gaps.verticalGapOf(20),
+                const Divider(),
+                Gaps.verticalGapOf(20),
+
+                // Energy & Rate Information
+                Text(
+                  'Energy & Rate Information',
+                  style: AppStyles.text14PxSemiBold,
+                ),
+                Gaps.verticalGapOf(12),
+                _buildDetailRow(
+                  label: 'Energy Delivered',
+                  value: '${session.energyDelivered.toStringAsFixed(2)} kWh',
+                ),
+                _buildDetailRow(
+                  label: 'Rate Type',
+                  value:
+                      '${rateBreakdown['rateName']} (${rateBreakdown['timeSlot']})',
+                ),
+                _buildDetailRow(
+                  label: 'Rate per kWh',
+                  value:
+                      'Rs. ${ChargingRates.getTotalRatePerKwh().toStringAsFixed(2)}',
+                ),
+                Gaps.verticalGapOf(20),
+                const Divider(),
+                Gaps.verticalGapOf(20),
+
+                // Cost Breakdown
+                Text('Cost Breakdown', style: AppStyles.text14PxSemiBold),
+                Gaps.verticalGapOf(12),
+                _buildDetailRow(
+                  label: 'Energy Charge',
+                  value:
+                      'Rs. ${rateBreakdown['energyCharge'].toStringAsFixed(2)}',
+                ),
+                _buildDetailRow(
+                  label: 'Service Fee',
+                  value: 'Rs. ${rateBreakdown['fee'].toStringAsFixed(2)}',
+                ),
+                _buildDetailRow(
+                  label: 'Service Charge',
+                  value:
+                      'Rs. ${rateBreakdown['serviceCharge'].toStringAsFixed(2)}',
+                ),
+                Gaps.verticalGapOf(16),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: AppColors.kPrimaryColor.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Total Amount', style: AppStyles.text16PxSemiBold),
+                      Text(
+                        'Rs. ${rateBreakdown['total'].toStringAsFixed(2)}',
+                        style: AppStyles.text18PxBold.copyWith(
+                          color: AppColors.kPrimaryColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (repaintKey != null) {
+      return RepaintBoundary(key: repaintKey, child: body);
+    }
+    return body;
+  }
+
+  Widget _buildDetailRow({required String label, required String value}) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: AppStyles.text14PxRegular.copyWith(color: AppColors.kGrey),
+          ),
+          Text(value, style: AppStyles.text14PxMedium),
+        ],
+      ),
+    );
+  }
+
+}
