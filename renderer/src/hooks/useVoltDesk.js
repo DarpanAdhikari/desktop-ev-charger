@@ -41,12 +41,15 @@ export function useBills() {
 
 export function useLogs() {
   const [logs, setLogs] = useState([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async (opts) => {
+    setLoading(true);
     try {
       const data = await ipc.listLogs(opts);
-      setLogs(data);
+      setLogs(data.rows || []);
+      setTotal(data.total || 0);
     } catch (e) {
       console.error('Failed to load logs:', e);
     } finally {
@@ -54,8 +57,7 @@ export function useLogs() {
     }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
-  return { logs, loading, refresh };
+  return { logs, total, loading, refresh };
 }
 
 export function useSettings() {

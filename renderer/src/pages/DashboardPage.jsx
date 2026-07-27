@@ -2,7 +2,7 @@ import { useChargers, useBills, useLiveEvents } from '../hooks/useVoltDesk';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import ChargerStatusCard from '../components/ChargerStatusCard';
 
-export default function DashboardPage({ addToast }) {
+export default function DashboardPage({ addToast, offlineConnectors }) {
   const { chargers, loading, refresh } = useChargers();
   const { bills } = useBills();
 
@@ -59,7 +59,7 @@ export default function DashboardPage({ addToast }) {
           </h2>
           <div className="chgr-grid" style={{ marginBottom: 20 }}>
             {chargers.map((ch) => (
-              <ChargerStatusCard key={ch.id} charger={ch} />
+              <ChargerStatusCard key={ch.id} charger={ch} offlineConnectors={offlineConnectors} />
             ))}
           </div>
         </>

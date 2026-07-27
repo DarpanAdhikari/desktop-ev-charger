@@ -86,6 +86,7 @@ export default function BillingPage({ refreshKey, addToast }) {
           bill={selectedBill}
           onClose={() => setSelectedBill(null)}
           onPrint={handlePrint}
+          addToast={addToast}
         />
       )}
     </>

@@ -1,14 +1,17 @@
 import { useNavigate } from 'react-router-dom';
 
-export default function ChargerStatusCard({ charger }) {
+export default function ChargerStatusCard({ charger, offlineConnectors }) {
   const navigate = useNavigate();
   const hasActiveTx = (charger.active_transactions || []).length > 0;
+  const allOffline = (charger.connectors || []).length > 0 && (charger.connectors || []).every(
+    (c) => offlineConnectors?.[`${charger.id}:${c.connector_id}`]
+  );
   const primaryConnector = (charger.connectors || []).find((con) => con._meter)
     || (charger.connectors || [])[0];
   const meter = primaryConnector ? primaryConnector._meter : null;
-  const isCharging = (charger.connectors || []).some(
-    (c) => (c.status || '').toLowerCase() === 'charging' || Number(c._meter?.power_kw ?? c._meter?.rate_kw) > 0
-  ) || Number(meter?.power_kw ?? meter?.rate_kw) > 0 || hasActiveTx;
+  const isCharging = !allOffline && (charger.connectors || []).some(
+    (c) => (c.status || '').toLowerCase() === 'charging'
+  );
   const activeTx = charger.active_transactions ? charger.active_transactions[0] : null;
   const soc = meter?.soc ?? (activeTx ? activeTx.soc_end || activeTx.soc_start || 0 : 0);
   const pct = Math.min(Math.max(soc, 0), 100);
@@ -21,7 +24,7 @@ export default function ChargerStatusCard({ charger }) {
 
   const connectorSummary = countStatuses(charger.connectors);
   const online = charger.online;
-  const statusKey = isCharging ? 'charging' : online ? 'available' : 'offline';
+  const statusKey = isCharging ? 'charging' : (online && !allOffline) ? 'available' : 'offline';
   const hasFault = connectorSummary.faulted > 0;
 
   return (
@@ -32,8 +35,8 @@ export default function ChargerStatusCard({ charger }) {
       {/* Top bar: charger ID + status badge */}
       <div className="chgr-top">
         <span className="chgr-id">{charger.id}</span>
-        <span className={`chgr-badge ${online ? 'online' : 'offline'}`}>
-          {isCharging ? 'CHARGING' : online ? 'ONLINE' : 'OFFLINE'}
+        <span className={`chgr-badge ${statusKey}`}>
+          {statusKey === 'charging' ? 'CHARGING' : statusKey === 'offline' ? 'OFFLINE' : 'ONLINE'}
         </span>
       </div>
 
@@ -103,7 +106,7 @@ export default function ChargerStatusCard({ charger }) {
       {/* Connector status chips */}
       <div className="chgr-conns">
         {(charger.connectors || []).map((con) => (
-          <span key={con.connector_id} className={`chgr-conn-chip ${statusDotClass(con.status, con._meter)}`}>
+          <span key={con.connector_id} className={`chgr-conn-chip ${statusDotClass(con.status, con._meter)} ${offlineConnectors?.[`${charger.id}:${con.connector_id}`] ? 'dot-offline' : ''}`}>
             <span>{con.connector_id}</span>
             {con._meter?.eta_minutes != null && (
               <span className="chgr-conn-eta">~{formatMin(con._meter.eta_minutes)}</span>

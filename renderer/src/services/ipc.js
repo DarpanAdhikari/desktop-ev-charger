@@ -40,6 +40,18 @@ export function printBill(opts) {
   return api.printBill(opts);
 }
 
+export function generateBillPdf(billId) {
+  return api.generateBillPdf(billId);
+}
+
+export function generateBillImage(billId) {
+  return api.generateBillImage(billId);
+}
+
+export function getBillPreview(billId) {
+  return api.getBillPreview(billId);
+}
+
 export function sendAction(payload) {
   return api.sendAction(payload);
 }
@@ -82,4 +94,20 @@ export function resetApp(opts) {
 
 export function checkHealth() {
   return api.checkHealth();
+}
+
+export function pickImage() {
+  return api.pickImage();
+}
+
+export function searchCustomers(query) {
+  return api.searchCustomers(query);
+}
+
+export function fetchCompanyInfo() {
+  return api.fetchCompanyInfo();
+}
+
+export function fetchBillTemplate() {
+  return api.fetchBillTemplate();
 }

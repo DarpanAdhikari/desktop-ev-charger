@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 
-const ENDPOINT_DOCS = {
+export const ENDPOINT_DOCS = {
   api_endpoint_bills: {
     label: 'Bills',
     method: 'POST',
@@ -35,6 +35,27 @@ const ENDPOINT_DOCS = {
     description: 'Used only until the app can estimate capacity from session energy divided by SoC delta, multiplied by 100.',
     request: 'session.energy / session.soc_delta * 100',
     response: 'Estimated kWh capacity for kW-based ETA',
+  },
+  api_company_info_endpoint: {
+    label: 'Company Info',
+    method: 'GET',
+    description: 'Full URL to fetch company details from. Response populates Company Name, Address, Phone, Email and logos in Branding settings.',
+    request: '—',
+    response: '{ company_name (fills Company Name), company_address, company_phone, company_email, branding_logo (URL, auto-downloaded to base64), invoice_logo (URL, auto-downloaded to base64) }',
+  },
+  api_bill_format_endpoint: {
+    label: 'Bill Format',
+    method: 'GET',
+    description: 'Fetches an HTML bill template with {{keyword}} placeholders that get replaced at print time.',
+    request: '—',
+    response: 'HTML string with {{customer_name}}, {{customer_id}}, {{customer_pan}}, {{customer_address}}, {{customer_vehicle}}, {{company_name}}, {{bill_number}}, {{created_at}}, {{charger_id}}, {{connector_id}}, {{energy_kwh}}, {{rate_per_kwh}}, {{subtotal}}, {{tax_percent}}, {{tax_amount}}, {{service_fee}}, {{service_charge}}, {{total}}, {{soc_start}}, {{soc_end}}, {{started_at}}, {{stopped_at}}, {{duration_sec}}, {{rate_name}}',
+  },
+  api_customer_search_endpoint: {
+    label: 'Customer Search',
+    method: 'GET',
+    description: 'Searches customers in real-time as the user types. Queried with ?q= prefix. When configured, a customer must be selected before starting a charger. Customer info flows into the transaction and bill.',
+    request: 'GET ?q=<search query>',
+    response: '[{ customer_id (required), customer_name (required), customer_pan, customer_address, customer_vehicle }]',
   },
 };
 

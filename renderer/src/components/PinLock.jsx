@@ -1,7 +1,8 @@
 import { useState, useRef } from 'react';
-import logoUrl from '../../../assets/logo/logo.png';
+import staticLogoUrl from '../../../assets/logo/logo.png';
 
-export default function PinLock({ onUnlock }) {
+export default function PinLock({ onUnlock, brandingLogo }) {
+  const logoUrl = brandingLogo || staticLogoUrl;
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
   const inputRef = useRef(null);

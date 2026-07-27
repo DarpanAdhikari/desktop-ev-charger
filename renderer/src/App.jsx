@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { HashRouter, Routes, Route, NavLink } from 'react-router-dom';
-import { useConnectionStatus, useToast } from './hooks/useVoltDesk';
-import { getSettings, setSettings } from './services/ipc';
+import { useConnectionStatus, useToast, useLiveEvents } from './hooks/useVoltDesk';
+import { getSettings, setSettings, listChargers, fetchCompanyInfo } from './services/ipc';
 import ChargersPage from './pages/ChargersPage';
 import ChargerDetailPage from './pages/ChargerDetailPage';
 import BillingPage from './pages/BillingPage';
@@ -18,7 +18,68 @@ const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 function Shell() {
   const { connected, connecting, url, error: wsError, health } = useConnectionStatus();
   const { toasts, addToast } = useToast();
+  const [chargerAlerts, setChargerAlerts] = useState({});
+  const [offlineConnectors, setOfflineConnectors] = useState({});
+  const lastSeen = useRef({});
   const [refreshKey, setRefreshKey] = useState(0);
+
+  useLiveEvents({
+    onChargerEvent: (evt) => {
+      if (evt.charger_id) {
+        lastSeen.current['c:' + evt.charger_id] = Date.now();
+      }
+      if (evt.connector_id != null) {
+        const key = `${evt.charger_id}:${evt.connector_id}`;
+        lastSeen.current[key] = Date.now();
+        setOfflineConnectors((prev) => {
+          if (!prev[key]) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      }
+      if (evt.type === 'charger_status') {
+        setChargerAlerts((prev) => ({ ...prev, [evt.charger_id]: { status: evt.status, error: evt.error, ts: Date.now() } }));
+      }
+    }
+  });
+
+  useEffect(() => {
+    let mounted = true;
+    const tick = async () => {
+      const now = Date.now();
+      const stale = {};
+      for (const [key, ts] of Object.entries(lastSeen.current)) {
+        if (now - ts > 60000) stale[key] = ts;
+      }
+      try {
+        const chargersData = await listChargers();
+        if (!mounted) return;
+        for (const ch of chargersData) {
+          const chargerSeen = lastSeen.current['c:' + ch.id];
+          for (const con of (ch.connectors || [])) {
+            const key = `${ch.id}:${con.connector_id}`;
+            const ts = lastSeen.current[key];
+            if (!ts && (!chargerSeen || now - chargerSeen > 60000)) {
+              stale[key] = chargerSeen || (now - 60001);
+            }
+          }
+        }
+      } catch (e) { /* ignore */ }
+      setOfflineConnectors((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(stale)) next[key] = stale[key];
+        for (const key of Object.keys(next)) {
+          if (!stale[key] && !lastSeen.current[key]) delete next[key];
+        }
+        return next;
+      });
+    };
+    tick();
+    const interval = setInterval(tick, 30000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, []);
+  const [brandingLogo, setBrandingLogo] = useState(null);
   const [locked, setLocked] = useState(false);
   const [pinCode, setPinCode] = useState(null);
   const [theme, setTheme] = useState('dark');
@@ -28,6 +89,7 @@ function Shell() {
     getSettings().then((s) => {
       setPinCode(s.pin_code || '');
       setTheme(s.theme || 'dark');
+      if (s.branding_logo) setBrandingLogo(s.branding_logo);
       if (s.pin_code) setLocked(true);
     });
   }, []);
@@ -91,7 +153,7 @@ function Shell() {
     <div className="shell" onClick={resetInactivityTimer} onMouseMove={resetInactivityTimer} onKeyDown={resetInactivityTimer}>
       <nav className="sidebar">
         <div className="brand">
-          <img className="brand-logo" src={logoUrl} alt="DRP logo" />
+          <img className="brand-logo" src={brandingLogo || logoUrl} alt="DRP logo" />
           <div className="brand-copy">
             <div className="brand-name">DRP</div>
             <div className="brand-subtitle">Dynamic Recharge Platform</div>
@@ -145,13 +207,32 @@ function Shell() {
             {healthLabel}
           </div>
         )}
+        {Object.entries(chargerAlerts).map(([cid, alert]) => {
+          const s = (alert.status || '').toLowerCase();
+          if (s === 'available') return null;
+          return (
+            <div key={cid} style={{
+              padding: '0 20px 4px', fontSize: 10,
+              fontFamily: "'JetBrains Mono', monospace", display: 'flex', alignItems: 'center', gap: 4,
+              color: s === 'faulted' ? 'var(--red)' : 'var(--amber)',
+            }}>
+              <span style={{ width: 5, height: 5, borderRadius: '50%', display: 'inline-block', background: s === 'faulted' ? 'var(--red)' : 'var(--amber)' }}></span>
+              {cid}: {alert.status}{alert.error ? ` - ${alert.error}` : ''}
+            </div>
+          );
+        })}
+        {Object.entries(offlineConnectors).length > 0 && (
+          <div style={{ padding: '0 20px 8px', fontSize: 10, color: 'var(--red)', fontFamily: "'JetBrains Mono', monospace" }}>
+            {Object.keys(offlineConnectors).length} connector(s) offline
+          </div>
+        )}
       </nav>
 
       <main className="content">
         <Routes>
-          <Route path="/" element={<DashboardPage refreshKey={refreshKey} addToast={addToast} />} />
+          <Route path="/" element={<DashboardPage refreshKey={refreshKey} addToast={addToast} offlineConnectors={offlineConnectors} />} />
           <Route path="/chargers" element={<ChargersPage refreshKey={refreshKey} addToast={addToast} />} />
-          <Route path="/chargers/:id" element={<ChargerDetailPage refreshKey={refreshKey} addToast={addToast} />} />
+          <Route path="/chargers/:id" element={<ChargerDetailPage refreshKey={refreshKey} addToast={addToast} offlineConnectors={offlineConnectors} />} />
           <Route path="/billing" element={<BillingPage refreshKey={refreshKey} addToast={addToast} />} />
           <Route path="/transactions" element={<TransactionsPage refreshKey={refreshKey} addToast={addToast} />} />
           <Route path="/logs" element={<LogsPage refreshKey={refreshKey} addToast={addToast} />} />
@@ -165,7 +246,7 @@ function Shell() {
 
   return (
     <>
-      {pinCode && locked && <PinLock onUnlock={handleUnlock} />}
+      {pinCode && locked && <PinLock onUnlock={handleUnlock} brandingLogo={brandingLogo} />}
       {content}
     </>
   );

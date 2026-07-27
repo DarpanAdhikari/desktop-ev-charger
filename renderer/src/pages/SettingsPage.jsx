@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSettings } from '../hooks/useVoltDesk';
-import { listPrinters, dbBackup, dbRestore, resetApp, checkHealth } from '../services/ipc';
-import FieldTooltip from '../components/FieldTooltip';
+import { listPrinters, dbBackup, dbRestore, resetApp, checkHealth, pickImage, fetchCompanyInfo } from '../services/ipc';
+import FieldTooltip, { ENDPOINT_DOCS } from '../components/FieldTooltip';
 
 const WS_SCHEMES = ['ws:', 'wss:'];
 const HTTP_SCHEMES = ['http:', 'https:'];
@@ -25,6 +25,7 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
   const [errors, setErrors] = useState({});
   const [savingSection, setSavingSection] = useState(null);
   const [printers, setPrinters] = useState([]);
+  const [activeTab, setActiveTab] = useState('connection');
 
   useEffect(() => {
     listPrinters().then(setPrinters).catch(() => {});
@@ -123,15 +124,28 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
     return <div className="empty-state"><p>Loading settings...</p></div>;
   }
 
+  const TABS = [
+    { id: 'connection', label: 'Connection' },
+    { id: 'branding', label: 'Branding & Invoice' },
+    { id: 'pricing', label: 'Rate & Shifts' },
+    { id: 'backend', label: 'Backend Sync' },
+    { id: 'security', label: 'Security' },
+    { id: 'maintenance', label: 'Maintenance' },
+  ];
   return (
     <>
       <header className="view-header">
         <h1>Settings</h1>
-        <p className="muted">Connection, shifts, tax, branding and sync.</p>
+        <p className="muted">Connection, branding, rate, shifts, tax and sync.</p>
       </header>
 
-      <div className="settings-grid">
-        {/* Connection */}
+      <nav className="settings-tabs">
+        {TABS.map((t) => (
+          <button key={t.id} className={`settings-tab${activeTab === t.id ? ' active' : ''}`} onClick={() => setActiveTab(t.id)}>{t.label}</button>
+        ))}
+      </nav>
+
+      {activeTab === 'connection' && (
         <div className="settings-card">
           <h2>Connection</h2>
           <div className="form-group">
@@ -169,13 +183,97 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             {savingSection === 'Connection' ? 'Saving...' : 'Save Connection'}
           </button>
         </div>
+      )}
 
-        {/* Branding */}
+      {activeTab === 'branding' && (
         <div className="settings-card">
           <h2>Branding & Invoice</h2>
+          {(form.api_base_url && form.api_company_info_endpoint) && (
+            <div className="form-group">
+              <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11 }}
+                onClick={async () => {
+                  const info = await fetchCompanyInfo();
+                  if (!info) { addToast('Failed to fetch company info', 'error'); return; }
+                  if (info.company_name) updateField('company_name', info.company_name);
+                  if (info.company_address) updateField('company_address', info.company_address);
+                  if (info.company_phone) updateField('company_phone', info.company_phone);
+                  if (info.company_email) updateField('company_email', info.company_email);
+                  if (info.branding_logo) updateField('branding_logo', info.branding_logo);
+                  if (info.invoice_logo) updateField('invoice_logo', info.invoice_logo);
+                  addToast('Company info updated from API', 'success');
+                }}
+              >Fetch from API</button>
+            </div>
+          )}
           <div className="form-group">
             <label>Company Name</label>
             <input value={form.company_name || ''} onChange={(e) => updateField('company_name', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Company Address</label>
+            <input value={form.company_address || ''} onChange={(e) => updateField('company_address', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Company Phone</label>
+            <input value={form.company_phone || ''} onChange={(e) => updateField('company_phone', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Company Email</label>
+            <input value={form.company_email || ''} onChange={(e) => updateField('company_email', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Branding Logo</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {form.branding_logo ? (
+                <img src={form.branding_logo} alt="Branding" style={{ width: 80, height: 60, objectFit: 'contain', borderRadius: 6, background: '#1a1a1a' }} />
+              ) : (
+                <div style={{ width: 80, height: 60, borderRadius: 6, background: '#1a1a1a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#666' }}>No logo</div>
+              )}
+              <button className="btn ghost" style={{ padding: '4px 12px', fontSize: 11 }} onClick={async () => {
+                const r = await pickImage();
+                if (r && !r.canceled) updateField('branding_logo', r.data);
+              }}>Upload</button>
+              {form.branding_logo && (
+                <button className="btn ghost" style={{ padding: '4px 12px', fontSize: 11, color: 'var(--red)' }} onClick={() => updateField('branding_logo', '')}>Clear</button>
+              )}
+            </div>
+          </div>
+          <div className="form-group">
+            <label>Invoice Logo</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {form.invoice_logo ? (
+                <img src={form.invoice_logo} alt="Invoice" style={{ width: 80, height: 60, objectFit: 'contain', borderRadius: 6, background: '#1a1a1a' }} />
+              ) : (
+                <div style={{ width: 80, height: 60, borderRadius: 6, background: '#1a1a1a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#666' }}>No logo</div>
+              )}
+              <button className="btn ghost" style={{ padding: '4px 12px', fontSize: 11 }} onClick={async () => {
+                const r = await pickImage();
+                if (r && !r.canceled) updateField('invoice_logo', r.data);
+              }}>Upload</button>
+              {form.invoice_logo && (
+                <button className="btn ghost" style={{ padding: '4px 12px', fontSize: 11, color: 'var(--red)' }} onClick={() => updateField('invoice_logo', '')}>Clear</button>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+              <input
+                type="checkbox"
+                id="show_logo"
+                checked={form.show_logo_on_bill === '1'}
+                onChange={(e) => updateField('show_logo_on_bill', e.target.checked ? '1' : '0')}
+                style={{ width: 'auto', accentColor: 'var(--amber)' }}
+              />
+              <label htmlFor="show_logo" style={{ margin: 0, cursor: 'pointer', fontSize: 12 }}>Show logo on invoice</label>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+              <input
+                type="checkbox"
+                id="use_new_format"
+                checked={form.use_new_bill_format === '1'}
+                onChange={(e) => updateField('use_new_bill_format', e.target.checked ? '1' : '0')}
+                style={{ width: 'auto', accentColor: 'var(--amber)' }}
+              />
+              <label htmlFor="use_new_format" style={{ margin: 0, cursor: 'pointer', fontSize: 12 }}>Use enhanced invoice format</label>
+            </div>
           </div>
           <div className="form-group">
             <label>Bill Number Prefix</label>
@@ -197,11 +295,30 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               ))}
             </select>
           </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div className="form-group">
+              <label>Service Fee (per session)</label>
+              <input type="number" min="0" step="0.01" value={form.service_fee || ''} onChange={(e) => updateField('service_fee', e.target.value)} placeholder="0.00" />
+            </div>
+            <div className="form-group">
+              <label>Service Charge (per session)</label>
+              <input type="number" min="0" step="0.01" value={form.service_charge || ''} onChange={(e) => updateField('service_charge', e.target.value)} placeholder="0.00" />
+            </div>
+          </div>
           <button
             className="btn primary"
             disabled={savingSection === 'Branding'}
             onClick={() => saveSection('Branding', {
               company_name: form.company_name || '',
+              company_address: form.company_address || '',
+              company_phone: form.company_phone || '',
+              company_email: form.company_email || '',
+              branding_logo: form.branding_logo || '',
+              invoice_logo: form.invoice_logo || '',
+              show_logo_on_bill: form.show_logo_on_bill || '0',
+              use_new_bill_format: form.use_new_bill_format || '0',
+              service_fee: form.service_fee || '0',
+              service_charge: form.service_charge || '0',
               bill_prefix: form.bill_prefix || 'INV',
               bill_format: form.bill_format || 'thermal_80mm',
               print_device_name: form.print_device_name || '',
@@ -210,68 +327,9 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             {savingSection === 'Branding' ? 'Saving...' : 'Save Branding'}
           </button>
         </div>
+      )}
 
-        {/* Backend Sync */}
-        <div className="settings-card full">
-          <h2>Backend Sync</h2>
-          <div className="form-group">
-            <label>API Base URL</label>
-            <input
-              value={form.api_base_url || ''}
-              onChange={(e) => updateField('api_base_url', e.target.value)}
-              placeholder="https://your-server.com"
-            />
-            {errors.api_base_url && <div className="field-error">{errors.api_base_url}</div>}
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
-            <div className="form-group">
-              <label>Bills Endpoint<FieldTooltip endpointKey="api_endpoint_bills" /></label>
-              <input value={form.api_endpoint_bills || ''} onChange={(e) => updateField('api_endpoint_bills', e.target.value)} placeholder="/api/bills" />
-            </div>
-            <div className="form-group">
-              <label>Logs Endpoint<FieldTooltip endpointKey="api_endpoint_logs" /></label>
-              <input value={form.api_endpoint_logs || ''} onChange={(e) => updateField('api_endpoint_logs', e.target.value)} placeholder="/api/logs" />
-            </div>
-            <div className="form-group">
-              <label>Transactions Endpoint<FieldTooltip endpointKey="api_endpoint_transactions" /></label>
-              <input value={form.api_endpoint_transactions || ''} onChange={(e) => updateField('api_endpoint_transactions', e.target.value)} placeholder="/api/transactions" />
-            </div>
-            <div className="form-group">
-              <label>Health Endpoint<FieldTooltip endpointKey="api_health_endpoint" /></label>
-              <div style={{ display: 'flex', gap: 4 }}>
-                <input value={form.api_health_endpoint || ''} onChange={(e) => updateField('api_health_endpoint', e.target.value)} placeholder="/api/health" style={{ flex: 1 }} />
-                <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11, whiteSpace: 'nowrap' }}
-                  onClick={async () => {
-                    const r = await checkHealth();
-                    if (r.ok) addToast(`API health: ${r.status} (${r.latency}ms)`, 'success');
-                    else if (r.reason === 'not_configured') addToast('API Base URL not configured', 'error');
-                    else addToast(`API health failed: ${r.reason} (${r.latency}ms)`, 'error');
-                  }}
-                >Test</button>
-              </div>
-            </div>
-          </div>
-          <div className="form-group">
-            <label>API Key</label>
-            <input type="password" value={form.api_key || ''} onChange={(e) => updateField('api_key', e.target.value)} />
-          </div>
-          <button
-            className="btn primary"
-            disabled={savingSection === 'Backend Sync'}
-            onClick={() => saveSection('Backend Sync', {
-              api_base_url: form.api_base_url || '',
-              api_endpoint_bills: form.api_endpoint_bills || '',
-              api_endpoint_logs: form.api_endpoint_logs || '',
-              api_endpoint_transactions: form.api_endpoint_transactions || '',
-              api_health_endpoint: form.api_health_endpoint || '',
-              api_key: form.api_key || '',
-            }, validateBackend)}
-          >
-            {savingSection === 'Backend Sync' ? 'Saving...' : 'Save Backend Sync'}
-          </button>
-        </div>
-
-        {/* Charging Rate */}
+      {activeTab === 'pricing' && (
         <div className="settings-card">
           <h2>Charging Rate</h2>
           <div className="form-group">
@@ -315,28 +373,116 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               />
             </div>
           )}
-          <button
-            className="btn primary"
-            disabled={savingSection === 'Charging Rate'}
-            onClick={() => saveSection('Charging Rate', {
-              charging_rate_mode: form.charging_rate_mode === 'kw' ? 'kw' : 'percentage',
-              default_battery_capacity_kwh: form.default_battery_capacity_kwh || '',
-            })}
-          >
-            {savingSection === 'Charging Rate' ? 'Saving...' : 'Save Charging Rate'}
-          </button>
-        </div>
-
-        {/* Shifts & Tax */}
-        <div className="settings-card full">
+          <hr style={{ border: 'none', borderTop: '1px solid #333', margin: '16px 0' }} />
           <h2>Shifts & Tax</h2>
           {shifts.map((shift) => (
             <ShiftRow key={shift.id} shift={shift} onSave={saveShift} onDelete={removeShift} />
           ))}
           <button className="btn ghost" onClick={addShift} style={{ marginTop: 8 }}>+ Add shift</button>
+          <div style={{ marginTop: 20 }}>
+            <button
+              className="btn primary"
+              disabled={savingSection === 'Rate & Shifts'}
+              onClick={() => saveSection('Rate & Shifts', {
+                charging_rate_mode: form.charging_rate_mode === 'kw' ? 'kw' : 'percentage',
+                default_battery_capacity_kwh: form.default_battery_capacity_kwh || '',
+              })}
+            >
+              {savingSection === 'Rate & Shifts' ? 'Saving...' : 'Save'}
+            </button>
+          </div>
         </div>
+      )}
 
-        {/* Security */}
+      {activeTab === 'backend' && (
+        <div className="settings-card">
+          <h2>Backend Sync</h2>
+          <div style={{ display: 'flex', gap: 12 }}>
+            <div className="form-group" style={{ flex: 2 }}>
+              <label>API Base URL</label>
+              <input
+                value={form.api_base_url || ''}
+                onChange={(e) => updateField('api_base_url', e.target.value)}
+                placeholder="https://your-server.com"
+              />
+              {errors.api_base_url && <div className="field-error">{errors.api_base_url}</div>}
+            </div>
+            <div className="form-group" style={{ flex: 1 }}>
+              <label>API Key</label>
+              <input type="password" value={form.api_key || ''} onChange={(e) => updateField('api_key', e.target.value)} />
+            </div>
+          </div>
+          <hr style={{ border: 'none', borderTop: '1px solid #333', margin: '16px 0' }} />
+          {[
+            { key: 'api_endpoint_bills', placeholder: '/api/bills' },
+            { key: 'api_endpoint_logs', placeholder: '/api/logs' },
+            { key: 'api_endpoint_transactions', placeholder: '/api/transactions' },
+            { key: 'api_health_endpoint', placeholder: '/api/health', test: true },
+            { key: 'api_company_info_endpoint', placeholder: '/api/company' },
+            { key: 'api_bill_format_endpoint', placeholder: '/api/bill/template' },
+            { key: 'api_customer_search_endpoint', placeholder: '/api/customers/search' },
+          ].map(({ key, placeholder, test }) => {
+            const doc = ENDPOINT_DOCS[key] || null;
+            return (
+              <div key={key} style={{ marginBottom: 16, border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 12 }}>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 10, fontWeight: 600, color: '#fff', background: doc?.method === 'GET' ? 'var(--teal)' : 'var(--amber)', padding: '1px 6px', borderRadius: 4 }}>{doc?.method || '?'}</span>
+                      {doc?.label || key}
+                    </label>
+                    <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                      <input value={form[key] || ''} onChange={(e) => updateField(key, e.target.value)} placeholder={placeholder} style={{ flex: 1 }} />
+                      {test && (
+                        <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11, whiteSpace: 'nowrap' }}
+                          onClick={async () => {
+                            const r = await checkHealth();
+                            if (r.ok) addToast(`API health: ${r.status} (${r.latency}ms)`, 'success');
+                            else if (r.reason === 'not_configured') addToast('API Base URL not configured', 'error');
+                            else addToast(`API health failed: ${r.reason} (${r.latency}ms)`, 'error');
+                          }}
+                        >Test</button>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ flex: 1, fontSize: 11, color: 'var(--text-muted)' }}>
+                    <div style={{ fontWeight: 500, marginBottom: 4 }}>Expected Response</div>
+                    {doc?.request && doc.request !== '—' && (
+                      <div style={{ marginBottom: 4 }}>
+                        <span style={{ color: 'var(--text-secondary)' }}>Request body:</span>
+                        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: 'var(--amber)', marginTop: 2 }}>{doc.request}</div>
+                      </div>
+                    )}
+                    <div>
+                      <span style={{ color: 'var(--text-secondary)' }}>Response:</span>
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: 'var(--teal)', marginTop: 2 }}>{doc?.response || '—'}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          <button
+            className="btn primary"
+            disabled={savingSection === 'Backend Sync'}
+            onClick={() => saveSection('Backend Sync', {
+              api_base_url: form.api_base_url || '',
+              api_endpoint_bills: form.api_endpoint_bills || '',
+              api_endpoint_logs: form.api_endpoint_logs || '',
+              api_endpoint_transactions: form.api_endpoint_transactions || '',
+              api_health_endpoint: form.api_health_endpoint || '',
+              api_key: form.api_key || '',
+              api_company_info_endpoint: form.api_company_info_endpoint || '',
+              api_bill_format_endpoint: form.api_bill_format_endpoint || '',
+              api_customer_search_endpoint: form.api_customer_search_endpoint || '',
+            }, validateBackend)}
+          >
+            {savingSection === 'Backend Sync' ? 'Saving...' : 'Save Backend Sync'}
+          </button>
+        </div>
+      )}
+
+      {activeTab === 'security' && (
         <div className="settings-card">
           <h2>Security</h2>
           <div className="form-group">
@@ -362,35 +508,35 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             {savingSection === 'Security' ? 'Saving...' : 'Save Security'}
           </button>
         </div>
+      )}
 
-        {/* Backup & Restore */}
-        <div className="settings-card">
-          <h2>Backup & Restore</h2>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn ghost" onClick={async () => {
-              const r = await dbBackup();
-              if (r.success) addToast(`Backup saved to ${r.path}`, 'success');
-              else if (r.reason !== 'canceled') addToast(`Backup failed: ${r.reason}`, 'error');
-            }}>Backup Database</button>
-            <button className="btn danger" onClick={async () => {
-              if (!confirm('Restore will replace all current data. Continue?')) return;
-              const r = await dbRestore();
-              if (r.success) { addToast('Database restored successfully.', 'success'); if (triggerRefresh) triggerRefresh(); }
-              else if (r.reason !== 'canceled') addToast(`Restore failed: ${r.reason}`, 'error');
-            }}>Restore Database</button>
+      {activeTab === 'maintenance' && (
+        <>
+          <div className="settings-card" style={{ marginBottom: 16 }}>
+            <h2>Backup & Restore</h2>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn ghost" onClick={async () => {
+                const r = await dbBackup();
+                if (r.success) addToast(`Backup saved to ${r.path}`, 'success');
+                else if (r.reason !== 'canceled') addToast(`Backup failed: ${r.reason}`, 'error');
+              }}>Backup Database</button>
+              <button className="btn danger" onClick={async () => {
+                if (!confirm('Restore will replace all current data. Continue?')) return;
+                const r = await dbRestore();
+                if (r.success) { addToast('Database restored successfully.', 'success'); if (triggerRefresh) triggerRefresh(); }
+                else if (r.reason !== 'canceled') addToast(`Restore failed: ${r.reason}`, 'error');
+              }}>Restore Database</button>
+            </div>
           </div>
-        </div>
-
-        {/* Reset */}
-        <div className="settings-card">
-          <h2>Reset App</h2>
-          <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
-            Clears local settings, charger state, shifts, logs, transactions, bills and sync queue.
-          </p>
-          <button className="btn danger" onClick={handleResetApp}>Reset App</button>
-        </div>
-
-      </div>
+          <div className="settings-card">
+            <h2>Reset App</h2>
+            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
+              Clears local settings, charger state, shifts, logs, transactions, bills and sync queue.
+            </p>
+            <button className="btn danger" onClick={handleResetApp}>Reset App</button>
+          </div>
+        </>
+      )}
     </>
   );
 }

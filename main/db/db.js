@@ -14,6 +14,7 @@ function init() {
   db.pragma('foreign_keys = ON');
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schema);
+  runMigrations();
   seedDefaults();
   return db;
 }
@@ -24,10 +25,54 @@ function close() {
   }
 }
 
+function runMigrations() {
+  const migrations = [
+    `ALTER TABLE bills ADD COLUMN service_fee REAL DEFAULT 0`,
+    `ALTER TABLE bills ADD COLUMN service_charge REAL DEFAULT 0`,
+    `ALTER TABLE bills ADD COLUMN soc_start INTEGER`,
+    `ALTER TABLE bills ADD COLUMN soc_end INTEGER`,
+    `ALTER TABLE bills ADD COLUMN rate_name TEXT`,
+    `ALTER TABLE bills ADD COLUMN customer_id TEXT`,
+    `ALTER TABLE bills ADD COLUMN customer_name TEXT`,
+    `ALTER TABLE bills ADD COLUMN customer_pan TEXT`,
+    `ALTER TABLE bills ADD COLUMN customer_address TEXT`,
+    `ALTER TABLE bills ADD COLUMN customer_vehicle TEXT`,
+    `ALTER TABLE transactions ADD COLUMN customer_id TEXT`,
+    `ALTER TABLE transactions ADD COLUMN customer_name TEXT`,
+    `ALTER TABLE transactions ADD COLUMN customer_pan TEXT`,
+    `ALTER TABLE transactions ADD COLUMN customer_address TEXT`,
+    `ALTER TABLE transactions ADD COLUMN customer_vehicle TEXT`,
+  ];
+  for (const sql of migrations) {
+    try { db.exec(sql); } catch (e) { /* column may already exist */ }
+  }
+  const missingKeys = {
+    branding_logo: '',
+    invoice_logo: '',
+    show_logo_on_bill: '0',
+    use_new_bill_format: '0',
+    service_fee: '0',
+    service_charge: '0',
+    company_address: '',
+    company_phone: '',
+    company_email: '',
+    api_customer_search_endpoint: '',
+    api_company_info_endpoint: '',
+    api_bill_format_endpoint: ''
+  };
+  const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
+  for (const [k, v] of Object.entries(missingKeys)) {
+    try { insert.run(k, v); } catch (e) { /* ignore */ }
+  }
+}
+
 function seedDefaults() {
   const defaults = {
     ws_url: '',
     company_name: 'Your Company',
+    company_address: '',
+    company_phone: '',
+    company_email: '',
     bill_prefix: 'INV',
     bill_format: 'thermal_80mm', // thermal_80mm | a4
     next_bill_seq: '1',
@@ -41,7 +86,18 @@ function seedDefaults() {
     pin_code: '',
     theme: 'dark',
     charging_rate_mode: 'percentage',
-    default_battery_capacity_kwh: ''
+    default_battery_capacity_kwh: '',
+    branding_logo: '',
+    invoice_logo: '',
+    show_logo_on_bill: '0',
+    service_fee: '0',
+    service_charge: '0',
+    company_address: '',
+    company_phone: '',
+    company_email: '',
+    api_customer_search_endpoint: '',
+    api_company_info_endpoint: '',
+    api_bill_format_endpoint: ''
   };
   const insert = db.prepare(
     'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'

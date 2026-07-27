@@ -5,12 +5,13 @@ const db = require('./db/db');
 const { CsmsClient } = require('./services/wsClient');
 const syncWorker = require('./services/syncWorker');
 const { printBill } = require('./services/printService');
-const { renderBillHtml } = require('./services/billTemplate');
+const { renderBillHtml, setCachedTemplate } = require('./services/billTemplate');
 const { validateWsUrl } = require('./utils');
 
 let mainWindow;
 let csms;
 let connectionState = { connected: false, connecting: false, url: '', error: null };
+const pendingCustomers = new Map(); // "chargerId:connectorId" -> customer object
 
 function broadcast(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -102,7 +103,8 @@ app.whenReady().then(() => {
   const startupSettings = db.getSettings();
   csms = new CsmsClient((evt) => emitCsmsEvent(evt), {
     chargingRateMode: startupSettings.charging_rate_mode,
-    defaultBatteryCapacityKwh: startupSettings.default_battery_capacity_kwh
+    defaultBatteryCapacityKwh: startupSettings.default_battery_capacity_kwh,
+    pendingCustomers
   });
 
   if (startupSettings.ws_url) tryConnectWs(startupSettings.ws_url);
@@ -114,6 +116,12 @@ app.whenReady().then(() => {
   checkHealth(startupSettings).then((result) => {
     broadcast('csms:event', { type: 'health_status', ...result });
   });
+
+  if (startupSettings.api_bill_format_endpoint) {
+    fetch(startupSettings.api_base_url.replace(/\/$/, '') + startupSettings.api_bill_format_endpoint, {
+      headers: startupSettings.api_key ? { Authorization: `Bearer ${startupSettings.api_key}` } : {}
+    }).then(r => r.ok && r.text()).then(html => { if (html) setCachedTemplate(html); }).catch(() => {});
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -230,14 +238,20 @@ ipcMain.handle('chargers:list', () => {
   }));
 });
 
-ipcMain.handle('logs:list', (_e, { chargerId, limit } = {}) => {
+ipcMain.handle('logs:list', (_e, { chargerId, limit, offset } = {}) => {
   const raw = db.raw;
+  const lim = limit || 50;
+  const off = offset || 0;
   if (chargerId) {
-    return raw
-      .prepare('SELECT * FROM logs WHERE charger_id = ? ORDER BY id DESC LIMIT ?')
-      .all(chargerId, limit || 200);
+    const { count } = raw.prepare("SELECT COUNT(*) as count FROM logs WHERE charger_id = ?").get(chargerId);
+    const rows = raw
+      .prepare('SELECT * FROM logs WHERE charger_id = ? ORDER BY id DESC LIMIT ? OFFSET ?')
+      .all(chargerId, lim, off);
+    return { rows, total: count };
   }
-  return raw.prepare('SELECT * FROM logs ORDER BY id DESC LIMIT ?').all(limit || 200);
+  const { count } = raw.prepare("SELECT COUNT(*) as count FROM logs").get();
+  const rows = raw.prepare('SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?').all(lim, off);
+  return { rows, total: count };
 });
 
 ipcMain.handle('bills:list', (_e, { limit } = {}) =>
@@ -256,8 +270,152 @@ ipcMain.handle('bills:print', async (_e, { billId, deviceName }) => {
   return { ...result, bill: raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId) };
 });
 
+ipcMain.handle('bill:generatePdf', async (_e, arg) => {
+  const billId = (typeof arg === 'object' ? arg.billId : arg);
+  const raw = db.raw;
+  const bill = raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
+  if (!bill) return { success: false, reason: 'bill_not_found' };
+  const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
+  const settings = db.getSettings();
+  const html = renderBillHtml(bill, tx, settings);
+  const pdfWin = new BrowserWindow({
+    show: false,
+    webPreferences: { contextIsolation: true }
+  });
+  try {
+    await pdfWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    await pdfWin.webContents.executeJavaScript('document.fonts.ready');
+    const pdfBuffer = await pdfWin.webContents.printToPDF({
+      printBackground: true,
+      margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 }
+    });
+    return { success: true, data: pdfBuffer.toString('base64'), name: `${bill.bill_number}.pdf` };
+  } catch (err) {
+    return { success: false, reason: err.message };
+  } finally {
+    pdfWin.close();
+  }
+});
+
+ipcMain.handle('bill:previewHtml', async (_e, arg) => {
+  const billId = (typeof arg === 'object' ? arg.billId : arg);
+  const raw = db.raw;
+  const bill = raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
+  if (!bill) return { html: null, bill_number: null };
+  const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
+  const settings = db.getSettings();
+  const html = renderBillHtml(bill, tx, settings);
+  return { html, bill_number: bill.bill_number };
+});
+
+ipcMain.handle('bill:generateImage', async (_e, arg) => {
+  const billId = (typeof arg === 'object' ? arg.billId : arg);
+  const raw = db.raw;
+  const bill = raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
+  if (!bill) return { success: false, reason: 'bill_not_found' };
+  const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
+  const settings = db.getSettings();
+  const html = renderBillHtml(bill, tx, settings);
+  const imgWin = new BrowserWindow({
+    show: false, width: 400, height: 800,
+    webPreferences: { contextIsolation: true }
+  });
+  try {
+    await imgWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    await imgWin.webContents.executeJavaScript('document.fonts.ready');
+    const { width, height } = await imgWin.webContents.executeJavaScript(
+      `({ width: document.body.scrollWidth,
+          height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) })`
+    );
+    imgWin.setContentBounds({ x: 0, y: 0, width: Math.ceil(width) + 2, height: Math.min(Math.ceil(height), 3000) });
+    await new Promise((r) => setTimeout(r, 150));
+    const image = await imgWin.webContents.capturePage();
+    const pngBuffer = image.toPNG();
+    return { success: true, data: pngBuffer.toString('base64'), name: `${bill.bill_number}.png` };
+  } catch (err) {
+    return { success: false, reason: err.message };
+  } finally {
+    imgWin.close();
+  }
+});
+
 ipcMain.handle('health:check', async () => {
   return await checkHealth(db.getSettings());
+});
+
+ipcMain.handle('image:pick', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return { canceled: true };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }]
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  const filePath = result.filePaths[0];
+  const ext = path.extname(filePath).slice(1);
+  const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+  const data = fs.readFileSync(filePath).toString('base64');
+  return { canceled: false, data: `data:${mime};base64,${data}`, name: path.basename(filePath) };
+});
+
+ipcMain.handle('customer:search', async (_e, query) => {
+  const settings = db.getSettings();
+  const base = settings.api_base_url;
+  const path = settings.api_customer_search_endpoint;
+  if (!base || !path || !query) return [];
+  try {
+    const url = base.replace(/\/$/, '') + path + '?q=' + encodeURIComponent(query);
+    const res = await fetch(url, {
+      headers: settings.api_key ? { Authorization: `Bearer ${settings.api_key}` } : {}
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch { return []; }
+});
+
+async function urlToBase64(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return '';
+    const buf = Buffer.from(await res.arrayBuffer());
+    const ext = url.split('.').pop().split('?')[0]?.toLowerCase() || 'png';
+    const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/png';
+    return `data:${mime};base64,${buf.toString('base64')}`;
+  } catch { return ''; }
+}
+
+ipcMain.handle('company:info', async () => {
+  const settings = db.getSettings();
+  const base = settings.api_base_url;
+  const path = settings.api_company_info_endpoint;
+  if (!base || !path) return null;
+  try {
+    const url = base.replace(/\/$/, '') + path;
+    const res = await fetch(url, {
+      headers: settings.api_key ? { Authorization: `Bearer ${settings.api_key}` } : {}
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.branding_logo && !data.branding_logo.startsWith('data:')) data.branding_logo = await urlToBase64(data.branding_logo);
+    if (data.invoice_logo && !data.invoice_logo.startsWith('data:')) data.invoice_logo = await urlToBase64(data.invoice_logo);
+    return data;
+  } catch { return null; }
+});
+
+ipcMain.handle('bill:fetchTemplate', async () => {
+  const settings = db.getSettings();
+  const base = settings.api_base_url;
+  const path = settings.api_bill_format_endpoint;
+  if (!base || !path) return null;
+  try {
+    const url = base.replace(/\/$/, '') + path;
+    const res = await fetch(url, {
+      headers: settings.api_key ? { Authorization: `Bearer ${settings.api_key}` } : {}
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    setCachedTemplate(html);
+    return html;
+  } catch { return null; }
 });
 
 ipcMain.handle('printers:list', async () => {
@@ -389,9 +547,6 @@ ipcMain.handle('csms:action', (_e, actionPayload) => {
   const { charger_id: chargerId, connector_id: connectorId, action } = actionPayload;
 
   if (action === 'START') {
-    // Hard guard: only fire START when the connector is preparing/available
-    // and has no active session — prevents overlapping/duplicate starts even
-    // if the UI is double-clicked or two windows race each other.
     const check = canStartConnector(chargerId, connectorId);
     if (!check.ok) {
       broadcast('csms:event', {
@@ -403,6 +558,10 @@ ipcMain.handle('csms:action', (_e, actionPayload) => {
         reason: check.reason
       });
       return { sent: false, reason: check.reason };
+    }
+    const key = `${chargerId}:${connectorId}`;
+    if (actionPayload.customer) {
+      pendingCustomers.set(key, actionPayload.customer);
     }
   }
 

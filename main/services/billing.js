@@ -25,6 +25,12 @@ function getShiftsAtMinute(minuteOfDay, shifts) {
   return shifts.filter((s) => shiftContains(s, minuteOfDay));
 }
 
+function getShiftName(shiftId) {
+  if (shiftId == null) return null;
+  const shift = db.raw.prepare('SELECT name, start_time, end_time FROM shifts WHERE id = ?').get(shiftId);
+  return shift ? `${shift.name} (${shift.start_time}-${shift.end_time})` : null;
+}
+
 function generateBillForTransaction(transactionId) {
   const raw = db.raw;
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(transactionId);
@@ -37,9 +43,12 @@ function generateBillForTransaction(transactionId) {
 
   const activeShifts = raw.prepare('SELECT * FROM shifts WHERE active = 1').all();
 
+  const serviceFee = parseFloat(settings.service_fee) || 0;
+  const serviceCharge = parseFloat(settings.service_charge) || 0;
+
   if (activeShifts.length === 0) {
     // No shifts configured — fall back to flat rate of 0
-    return createBill(tx, settings, energy, 0, 0, 0, 0, 0, null);
+    return createBill(tx, settings, energy, 0, 0, 0, 0, 0, null, serviceFee, serviceCharge);
   }
 
   // For very short sessions (< 1 minute) just use the shift at start time
@@ -51,8 +60,8 @@ function generateBillForTransaction(transactionId) {
     const taxOn = shift && shift.tax_applicable === 1;
     const taxPercent = taxOn ? shift.tax_percent || 0 : 0;
     const taxAmount = Math.round(subtotal * (taxPercent / 100) * 100) / 100;
-    const total = Math.round((subtotal + taxAmount) * 100) / 100;
-    return createBill(tx, settings, energy, rate, subtotal, taxPercent, taxAmount, total, shift ? shift.id : null);
+    const total = Math.round((subtotal + taxAmount + serviceFee + serviceCharge) * 100) / 100;
+    return createBill(tx, settings, energy, rate, subtotal, taxPercent, taxAmount, total, shift ? shift.id : null, serviceFee, serviceCharge);
   }
 
   // Split energy proportionally across shifts
@@ -94,28 +103,33 @@ function generateBillForTransaction(transactionId) {
 
   totalSubtotal = Math.round(totalSubtotal * 100) / 100;
   totalTaxAmount = Math.round(totalTaxAmount * 100) / 100;
-  const total = Math.round((totalSubtotal + totalTaxAmount) * 100) / 100;
+  const total = Math.round((totalSubtotal + totalTaxAmount + serviceFee + serviceCharge) * 100) / 100;
 
   // Effective blended rate for display
   const effectiveRate = energy > 0
     ? Math.round((weightedRateSum / energy) * 10000) / 10000
     : 0;
 
-  return createBill(tx, settings, energy, effectiveRate, totalSubtotal, taxPercent, totalTaxAmount, total, applicableShiftId);
+  return createBill(tx, settings, energy, effectiveRate, totalSubtotal, taxPercent, totalTaxAmount, total, applicableShiftId, serviceFee, serviceCharge);
 }
 
-function createBill(tx, settings, energy, rate, subtotal, taxPercent, taxAmount, total, shiftId) {
+function createBill(tx, settings, energy, rate, subtotal, taxPercent, taxAmount, total, shiftId, serviceFee, serviceCharge) {
   const billNumber = db.nextBillNumber();
   const createdAt = new Date().toISOString();
   const raw = db.raw;
+  const rateName = shiftId ? getShiftName(shiftId) : null;
 
   const result = raw
     .prepare(
       `INSERT INTO bills
         (transaction_id, bill_number, company_name, shift_id, rate_per_kwh,
-         energy_kwh, subtotal, tax_percent, tax_amount, total, created_at)
+         energy_kwh, subtotal, tax_percent, tax_amount, service_fee, service_charge,
+         soc_start, soc_end, rate_name, total, created_at,
+         customer_id, customer_name, customer_pan, customer_address, customer_vehicle)
        VALUES (@transaction_id, @bill_number, @company_name, @shift_id, @rate_per_kwh,
-               @energy_kwh, @subtotal, @tax_percent, @tax_amount, @total, @created_at)`
+               @energy_kwh, @subtotal, @tax_percent, @tax_amount, @service_fee, @service_charge,
+               @soc_start, @soc_end, @rate_name, @total, @created_at,
+               @customer_id, @customer_name, @customer_pan, @customer_address, @customer_vehicle)`
     )
     .run({
       transaction_id: tx.id,
@@ -127,8 +141,18 @@ function createBill(tx, settings, energy, rate, subtotal, taxPercent, taxAmount,
       subtotal,
       tax_percent: taxPercent,
       tax_amount: taxAmount,
+      service_fee: serviceFee || 0,
+      service_charge: serviceCharge || 0,
+      soc_start: tx.soc_start != null ? tx.soc_start : null,
+      soc_end: tx.soc_end != null ? tx.soc_end : null,
+      rate_name: rateName,
       total,
-      created_at: createdAt
+      created_at: createdAt,
+      customer_id: tx.customer_id || null,
+      customer_name: tx.customer_name || null,
+      customer_pan: tx.customer_pan || null,
+      customer_address: tx.customer_address || null,
+      customer_vehicle: tx.customer_vehicle || null
     });
 
   const bill = raw.prepare('SELECT * FROM bills WHERE id = ?').get(result.lastInsertRowid);

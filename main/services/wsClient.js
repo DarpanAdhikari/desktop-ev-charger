@@ -19,6 +19,7 @@ class CsmsClient {
     this.chargingRateMode = options.chargingRateMode === 'kw' ? 'kw' : 'percentage';
     const capacity = Number(options.defaultBatteryCapacityKwh);
     this.defaultBatteryCapacityKwh = Number.isFinite(capacity) && capacity > 0 ? capacity : null;
+    this.pendingCustomers = options.pendingCustomers || null;
   }
 
   connect(url, options = {}) {
@@ -138,14 +139,31 @@ class CsmsClient {
           .run(chargerId, evt.connector_id, evt.to, evt.error, now);
         break;
 
-      case 'transaction_started':
+      case 'transaction_started': {
+        let customerId = null, customerName = null, customerPan = null, customerAddress = null, customerVehicle = null;
+        if (this.pendingCustomers && chargerId != null && evt.connector_id != null) {
+          const key = `${chargerId}:${evt.connector_id}`;
+          const cust = this.pendingCustomers.get(key);
+          if (cust) {
+            customerId = cust.customer_id || null;
+            customerName = cust.customer_name || null;
+            customerPan = cust.customer_pan || null;
+            customerAddress = cust.customer_address || null;
+            customerVehicle = cust.customer_vehicle || null;
+            this.pendingCustomers.delete(key);
+          }
+        }
         raw
           .prepare(
-            `INSERT INTO transactions (charger_id, connector_id, ocpp_tx_id, started_at, status)
-             VALUES (?, ?, ?, ?, 'active')`
+            `INSERT INTO transactions (charger_id, connector_id, ocpp_tx_id, started_at, status,
+              customer_id, customer_name, customer_pan, customer_address, customer_vehicle)
+             VALUES (?, ?, ?, ?, 'active',
+              ?, ?, ?, ?, ?)`
           )
-          .run(chargerId, evt.connector_id, evt.transaction_id, now);
+          .run(chargerId, evt.connector_id, evt.transaction_id, now,
+            customerId, customerName, customerPan, customerAddress, customerVehicle);
         break;
+      }
 
       case 'meter': {
         const meter = evt.meter || {};
@@ -165,12 +183,10 @@ class CsmsClient {
           raw
             .prepare(
               `INSERT INTO connectors (charger_id, connector_id, status, error_code, updated_at)
-               VALUES (?, ?, ?, NULL, ?)
-               ON CONFLICT(charger_id, connector_id) DO UPDATE SET
-                 status=CASE WHEN excluded.status = 'Charging' THEN excluded.status ELSE connectors.status END,
-                 updated_at=excluded.updated_at`
+               VALUES (?, ?, 'Unknown', NULL, ?)
+               ON CONFLICT(charger_id, connector_id) DO UPDATE SET updated_at=excluded.updated_at`
             )
-            .run(chargerId, evt.connector_id, powerKw != null && powerKw > 0 ? 'Charging' : 'Unknown', now);
+            .run(chargerId, evt.connector_id, now);
 
           const key = `${chargerId}:${evt.connector_id}`;
           const prev = this._meterCache.get(key);
@@ -253,6 +269,9 @@ class CsmsClient {
       }
 
       case 'transaction_stopped': {
+        if (chargerId && evt.connector_id != null) {
+          this._meterCache.delete(`${chargerId}:${evt.connector_id}`);
+        }
         const tx = raw
           .prepare(
             `SELECT * FROM transactions WHERE charger_id = ? AND ocpp_tx_id = ? AND status = 'active'

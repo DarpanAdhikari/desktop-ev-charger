@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('voltdesk', {
   listLogs: (opts) => ipcRenderer.invoke('logs:list', opts),
   listBills: (opts) => ipcRenderer.invoke('bills:list', opts),
   printBill: (opts) => ipcRenderer.invoke('bills:print', opts),
+  generateBillPdf: (billId) => ipcRenderer.invoke('bill:generatePdf', { billId }),
+  generateBillImage: (billId) => ipcRenderer.invoke('bill:generateImage', billId),
+  getBillPreview: (billId) => ipcRenderer.invoke('bill:previewHtml', billId),
   listPrinters: () => ipcRenderer.invoke('printers:list'),
 
   sendAction: (payload) => ipcRenderer.invoke('csms:action', payload),
@@ -26,6 +29,10 @@ contextBridge.exposeInMainWorld('voltdesk', {
   resetApp: (opts) => ipcRenderer.invoke('app:reset', opts),
 
   checkHealth: () => ipcRenderer.invoke('health:check'),
+  pickImage: () => ipcRenderer.invoke('image:pick'),
+  searchCustomers: (query) => ipcRenderer.invoke('customer:search', query),
+  fetchCompanyInfo: () => ipcRenderer.invoke('company:info'),
+  fetchBillTemplate: () => ipcRenderer.invoke('bill:fetchTemplate'),
 
   onEvent: (callback) => {
     const listener = (_e, evt) => callback(evt);
