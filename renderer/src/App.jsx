@@ -231,7 +231,7 @@ function Shell() {
       <main className="content">
         <Routes>
           <Route path="/" element={<DashboardPage refreshKey={refreshKey} addToast={addToast} offlineConnectors={offlineConnectors} />} />
-          <Route path="/chargers" element={<ChargersPage refreshKey={refreshKey} addToast={addToast} />} />
+          <Route path="/chargers" element={<ChargersPage refreshKey={refreshKey} addToast={addToast} offlineConnectors={offlineConnectors} />} />
           <Route path="/chargers/:id" element={<ChargerDetailPage refreshKey={refreshKey} addToast={addToast} offlineConnectors={offlineConnectors} />} />
           <Route path="/billing" element={<BillingPage refreshKey={refreshKey} addToast={addToast} />} />
           <Route path="/transactions" element={<TransactionsPage refreshKey={refreshKey} addToast={addToast} />} />

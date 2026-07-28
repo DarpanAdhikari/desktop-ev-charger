@@ -1,49 +1,43 @@
-# VoltDesk
+# DRP Dynamic Recharge Platform
 
 Electron console for an OCPP 1.6 CSMS: live charger/connector monitoring, per-session
-billing with shift-based tariffs and tax, direct invoice printing, and offline-first
-sync of bills/logs/transactions to a backend server.
+billing with shift-based tariffs and tax, direct invoice printing (network, Bluetooth,
+and system printer), and offline-first sync of bills/logs/transactions to a backend server.
 
-**DRP (Dynamic Rendering & Print Browser)** is meant to align with this app,
-not just sit beside it: DRP's print engine (silent-print pipeline,
-multi-printer-type support, rule builder) is the intended printing backend for
-VoltDesk's invoices, rather than VoltDesk owning its own separate print path.
-`printService.js` currently calls `webContents.print()` directly as a
-stand-in — swapping it to hand off to DRP's pipeline instead is the next real
-step here (I don't have DRP's source in this workspace yet, so I've left the
-integration point isolated in `printService.js` so it's a contained swap once
-that's available).
+## Scripts
 
-## Status: working scaffold (Phase 0)
-
-This is a real, runnable skeleton wired end-to-end — not a mockup. What's implemented:
-
-- Main-process WebSocket client that connects to the CSMS URL you set in Settings,
-  reconnects automatically, and mirrors `boot` / `heartbeat` / `status_transition` /
-  `transaction_started` / `meter` / `transaction_stopped` events into SQLite.
-- SQLite schema (`better-sqlite3`) for chargers, connectors, transactions, bills,
-  shifts, settings, logs, and a generic `sync_queue` outbox.
-- Billing engine: on `transaction_stopped`, picks the active shift by start time
-  (handles overnight-wrapping shifts), applies that shift's rate/kWh and tax %,
-  generates a numbered bill (`PREFIX-00001`), and queues it for sync.
-- Silent invoice printing via `webContents.print()`, with running success/fail
-  counters per bill and a reprint action.
-- Background sync worker draining the outbox to your backend on a timer, per
-  configured endpoint, with retry/attempt tracking.
-- Renderer UI: charger listing with connector status chips, a charger detail view
-  with an animated ring gauge per connector (amber pulse while charging), a billing
-  list + invoice modal, a raw log viewer, and a settings screen for the websocket
-  URL, branding, bill format, shifts/tax, and backend sync endpoints.
+```bash
+npm install            # install dependencies + rebuild better-sqlite3
+npm run dev            # dev mode (Vite hot-reload + Electron)
+npm run build:renderer # production build of the renderer (Vite)
+npm start              # launch Electron with current build
+npm run dist           # package distributable (electron-builder)
+```
 
 ## Run it
 
 ```bash
 npm install
+npm run build:renderer
 npm start
 ```
 
 On first launch, go to **Settings** and set your CSMS WebSocket URL
 (e.g. `wss://your-server:6008`) — nothing connects until you do.
+
+## Printing
+
+Three printer modes supported in Settings:
+
+| Mode | How it works |
+|---|---|
+| **System** | Uses `webContents.print()` — sends HTML to a Windows system printer (default or user-picked). |
+| **Network** | Connects to an ESC/POS thermal printer via TCP/IP (port 9100). Renders the bill HTML to a high-resolution bitmap, converts to `GS v 0` raster format, and sends raw ESC/POS. |
+| **Bluetooth** | Connects to a paired Bluetooth SPP printer. Falls through three methods: persistent WinRT daemon → one-shot RFCOMM script → direct COM port write (auto-baud). |
+
+Paper width (80mm / 58mm / custom) is configurable per printer type. Test print
+uses raw ESC/POS text commands (init, alignment, line feeds, cut) for crisp
+printer-native font rendering at 203 DPI.
 
 ## What still needs you
 
@@ -57,35 +51,38 @@ On first launch, go to **Settings** and set your CSMS WebSocket URL
    rolling SoC-per-minute rate per active transaction in the main process (or
    push it down from the Python side) and stream it through so the charger
    cards can show a real ETA.
-3. **Printer picker.** `printService.js` accepts a `deviceName`; Settings needs
-   a dropdown populated from `webContents.getPrintersAsync()` so users can pick
-   a specific thermal/receipt printer instead of the OS default.
-4. **Shift-spanning sessions.** Currently a bill is priced entirely at the shift
+3. **Shift-spanning sessions.** Currently a bill is priced entirely at the shift
    active when the session *started*. If you want a session that crosses a
    shift boundary to be split and priced proportionally, say so and I'll adjust
    `billing.js`.
-5. **Packaging.** `electron-builder` config is in `package.json`; icons and
-   platform-specific signing aren't set up yet.
 
 ## Architecture
 
 ```
 main/
-  main.js            window + IPC wiring + service lifecycle
-  preload.js          contextBridge surface (the only thing renderer can call)
+  main.js              window + IPC wiring + service lifecycle
+  preload.js           contextBridge surface (the only thing renderer can call)
+  bt-rfcomm.ps1        one-shot PowerShell RFCOMM connect / send / scan / pair
+  bt-rfcomm-daemon.ps1 persistent PowerShell daemon (WinRT Bluetooth socket)
   db/
-    schema.sql         SQLite schema
+    schema.sql          SQLite schema
     db.js               settings get/set, bill numbering
   services/
-    wsClient.js         persistent CSMS connection, event → SQLite mirroring
-    billing.js          shift lookup + bill generation
+    wsClient.js          persistent CSMS connection, event → SQLite mirroring
+    billing.js           shift lookup + bill generation
     billTemplate.js      HTML invoice for thermal_80mm / A4
-    printService.js      silent print + success/fail counters
-    syncWorker.js         outbox drain to backend API
+    printService.js       system printer (webContents.print) + success/fail counters
+    escposPrinter.js     ESC/POS rendering: HTML→bitmap capture, raster encoding,
+                         raw test payload generation, network socket + Bluetooth send
+    bluetoothPrinter.js  Bluetooth discovery, daemon manager, COM port fallback,
+                         baud rate detection, startup reconnect
+    syncWorker.js        outbox drain to backend API
 renderer/
-  index.html / styles.css / app.js   single-page UI, no build step
+  src/                   React app (Vite + React Router)
+    pages/               Settings, Chargers, Bills, Logs views
+    components/          UI components (gauge, table, modal, etc.)
+  dist/                  production build output
 ```
 
 Design language: near-black control-room palette, amber for "live/charging",
-teal for "available", red for faults — Space Grotesk for headings, JetBrains
-Mono for live meter/billing data.
+teal for "available", red for faults — monospace throughout.

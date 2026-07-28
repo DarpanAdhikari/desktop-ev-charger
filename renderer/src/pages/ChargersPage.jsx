@@ -3,7 +3,7 @@ import { useChargers, useLiveEvents } from '../hooks/useVoltDesk';
 import EmptyState from '../components/EmptyState';
 import ChargerStatusCard from '../components/ChargerStatusCard';
 
-export default function ChargersPage({ refreshKey, addToast }) {
+export default function ChargersPage({ refreshKey, addToast, offlineConnectors }) {
   const { chargers, loading, refresh } = useChargers();
   const [search, setSearch] = useState('');
 
@@ -47,7 +47,7 @@ export default function ChargersPage({ refreshKey, addToast }) {
       ) : (
         <div className="chgr-grid">
           {filtered.map((charger) => (
-            <ChargerStatusCard key={charger.id} charger={charger} />
+            <ChargerStatusCard key={charger.id} charger={charger} offlineConnectors={offlineConnectors} />
           ))}
         </div>
       )}

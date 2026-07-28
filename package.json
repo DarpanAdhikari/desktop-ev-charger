@@ -34,7 +34,7 @@
   "build": {
     "appId": "com.drp.dynamic-recharge-platform",
     "win": {
-      "icon": "assets/logo/logo.ico"
+      "icon": "assets/logo/logo_256.png"
     },
     "files": [
       "main/**/*",

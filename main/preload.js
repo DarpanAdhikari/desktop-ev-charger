@@ -17,6 +17,14 @@ contextBridge.exposeInMainWorld('voltdesk', {
   generateBillImage: (billId) => ipcRenderer.invoke('bill:generateImage', billId),
   getBillPreview: (billId) => ipcRenderer.invoke('bill:previewHtml', billId),
   listPrinters: () => ipcRenderer.invoke('printers:list'),
+  listComPorts: () => ipcRenderer.invoke('printers:listCom'),
+  testPrinter: (opts) => ipcRenderer.invoke('printers:test', opts),
+
+  bluetoothScan: () => ipcRenderer.invoke('bluetooth:scan'),
+  bluetoothConnect: (address) => ipcRenderer.invoke('bluetooth:connect', address),
+  bluetoothDisconnect: (address) => ipcRenderer.invoke('bluetooth:disconnect', address),
+  bluetoothList: () => ipcRenderer.invoke('bluetooth:list'),
+  bluetoothTest: (address) => ipcRenderer.invoke('bluetooth:test', address),
 
   sendAction: (payload) => ipcRenderer.invoke('csms:action', payload),
 

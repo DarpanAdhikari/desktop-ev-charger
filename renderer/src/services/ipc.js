@@ -64,6 +64,20 @@ export function listPrinters() {
   return api.listPrinters();
 }
 
+export function listComPorts() {
+  return api.listComPorts();
+}
+
+export function testPrinter(opts) {
+  return api.testPrinter(opts);
+}
+
+export function bluetoothScan() { return api.bluetoothScan(); }
+export function bluetoothConnect(address) { return api.bluetoothConnect(address); }
+export function bluetoothDisconnect(address) { return api.bluetoothDisconnect(address); }
+export function bluetoothList() { return api.bluetoothList(); }
+export function bluetoothTest(address) { return api.bluetoothTest(address); }
+
 export function listTransactions(opts) {
   return api.listTransactions(opts);
 }

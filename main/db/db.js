@@ -58,7 +58,14 @@ function runMigrations() {
     company_email: '',
     api_customer_search_endpoint: '',
     api_company_info_endpoint: '',
-    api_bill_format_endpoint: ''
+    api_bill_format_endpoint: '',
+    printer_type: 'system',
+    printer_network_ip: '',
+    printer_network_port: '9100',
+    printer_bt_com: '',
+    bt_printer_address: '',
+    bt_printer_name: '',
+    paper_width: ''
   };
   const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(missingKeys)) {
@@ -97,7 +104,14 @@ function seedDefaults() {
     company_email: '',
     api_customer_search_endpoint: '',
     api_company_info_endpoint: '',
-    api_bill_format_endpoint: ''
+    api_bill_format_endpoint: '',
+    printer_type: 'system',
+    printer_network_ip: '',
+    printer_network_port: '9100',
+    printer_bt_com: '',
+    bt_printer_address: '',
+    bt_printer_name: '',
+    paper_width: '80'
   };
   const insert = db.prepare(
     'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'

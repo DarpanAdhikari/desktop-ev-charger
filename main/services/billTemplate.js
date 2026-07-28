@@ -24,9 +24,15 @@ function formatDate(iso) {
   return `${mon} ${day}, ${year} - ${h}:${min} ${ampm}`;
 }
 
+function getPrintableWidth(settings) {
+  if (settings.bill_format === 'a4') return '210mm';
+  const pw = parseInt(settings.paper_width || '80', 10);
+  return Math.max(pw - 4, 30) + 'mm';
+}
+
 function renderBillHtmlOriginal(bill, tx, settings) {
   const isThermal = settings.bill_format === 'thermal_80mm';
-  const width = isThermal ? '76mm' : '210mm';
+  const width = isThermal ? getPrintableWidth(settings) : '210mm';
   const created = new Date(bill.created_at).toLocaleString();
   const company = settings.company_name || 'Company';
   const showLogo = settings.show_logo_on_bill === '1';
@@ -51,8 +57,8 @@ function renderBillHtmlOriginal(bill, tx, settings) {
   .logo-side { flex-shrink: 0; }
   .logo-side img { max-width: ${isThermal ? '35mm' : '80px'}; max-height: ${isThermal ? '44px' : '60px'}; display: block; }
   .company-side { ${logoData ? 'flex: 1; min-width: 0;' : ''} text-align: center; }
-  .company-name { font-weight: bold; font-size: ${isThermal ? '13px' : '18px'}; margin-bottom: 2px; }
-  .company-detail { font-size: ${isThermal ? '9px' : '11px'}; color: #555; line-height: 1.5; }
+  .company-name { font-weight: bold; font-size: ${isThermal ? '13px' : '18px'}; margin-bottom: 3px; letter-spacing: -0.3px; }
+  .company-detail { font-size: ${isThermal ? '9px' : '11px'}; color: #555; line-height: 1.5; margin-bottom: 1px; }
   h1 { font-size: ${isThermal ? '13px' : '18px'}; margin: 0 0 4px; text-align: center; }
   .sub { text-align: center; font-size: 10px; margin-bottom: 8px; }
   hr { border: none; border-top: 1px dashed #333; margin: 6px 0; }
@@ -103,7 +109,7 @@ function renderBillHtmlOriginal(bill, tx, settings) {
 
 function renderBillHtmlEnhanced(bill, tx, settings) {
   const isThermal = settings.bill_format === 'thermal_80mm';
-  const width = isThermal ? '76mm' : '210mm';
+  const width = isThermal ? getPrintableWidth(settings) : '210mm';
 
   const showLogo = settings.show_logo_on_bill === '1';
   const logoData = showLogo ? (settings.invoice_logo || settings.branding_logo || '') : '';
@@ -142,8 +148,8 @@ function renderBillHtmlEnhanced(bill, tx, settings) {
   .logo-side { flex-shrink: 0; }
   .logo-side img { max-width: ${isThermal ? '35mm' : '80px'}; max-height: ${isThermal ? '44px' : '60px'}; display: block; }
   .company-side { ${logoData ? 'flex: 1; min-width: 0;' : ''} text-align: center; }
-  .company-name { font-weight: bold; font-size: ${isThermal ? '13px' : '18px'}; margin-bottom: 2px; }
-  .company-detail { font-size: ${isThermal ? '9px' : '11px'}; color: #555; line-height: 1.5; }
+  .company-name { font-weight: bold; font-size: ${isThermal ? '13px' : '18px'}; margin-bottom: 3px; letter-spacing: -0.3px; }
+  .company-detail { font-size: ${isThermal ? '9px' : '11px'}; color: #555; line-height: 1.5; margin-bottom: 1px; }
   .check-wrap { text-align: center; margin-bottom: 4px; }
   .check { display: inline-block; width: ${isThermal ? '16px' : '22px'}; height: ${isThermal ? '16px' : '22px'};
            border-radius: 50%; background: #2e7d32; color: #fff; font-weight: bold;

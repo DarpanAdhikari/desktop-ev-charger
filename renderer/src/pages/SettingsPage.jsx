@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSettings } from '../hooks/useVoltDesk';
-import { listPrinters, dbBackup, dbRestore, resetApp, checkHealth, pickImage, fetchCompanyInfo } from '../services/ipc';
+import { listPrinters, testPrinter, dbBackup, dbRestore, resetApp, checkHealth, pickImage, fetchCompanyInfo, bluetoothScan, bluetoothConnect, bluetoothDisconnect, bluetoothList, bluetoothTest } from '../services/ipc';
 import FieldTooltip, { ENDPOINT_DOCS } from '../components/FieldTooltip';
 
 const WS_SCHEMES = ['ws:', 'wss:'];
@@ -25,6 +25,8 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
   const [errors, setErrors] = useState({});
   const [savingSection, setSavingSection] = useState(null);
   const [printers, setPrinters] = useState([]);
+  const [btDevices, setBtDevices] = useState([]);
+  const [btScanning, setBtScanning] = useState(false);
   const [activeTab, setActiveTab] = useState('connection');
 
   useEffect(() => {
@@ -128,6 +130,7 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
     { id: 'connection', label: 'Connection' },
     { id: 'branding', label: 'Branding & Invoice' },
     { id: 'pricing', label: 'Rate & Shifts' },
+    { id: 'printers', label: 'Printers' },
     { id: 'backend', label: 'Backend Sync' },
     { id: 'security', label: 'Security' },
     { id: 'maintenance', label: 'Maintenance' },
@@ -136,7 +139,7 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
     <>
       <header className="view-header">
         <h1>Settings</h1>
-        <p className="muted">Connection, branding, rate, shifts, tax and sync.</p>
+        <p className="muted">Connection, branding, rate, shifts, printers, tax and sync.</p>
       </header>
 
       <nav className="settings-tabs">
@@ -279,22 +282,6 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             <label>Bill Number Prefix</label>
             <input value={form.bill_prefix || 'INV'} onChange={(e) => updateField('bill_prefix', e.target.value)} />
           </div>
-          <div className="form-group">
-            <label>Print Format</label>
-            <select value={form.bill_format || 'thermal_80mm'} onChange={(e) => updateField('bill_format', e.target.value)}>
-              <option value="thermal_80mm">Thermal 80mm</option>
-              <option value="a4">A4</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Printer</label>
-            <select value={form.print_device_name || ''} onChange={(e) => updateField('print_device_name', e.target.value)}>
-              <option value="">— Default printer —</option>
-              {printers.map((p) => (
-                <option key={p.name} value={p.name}>{p.displayName || p.name}</option>
-              ))}
-            </select>
-          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div className="form-group">
               <label>Service Fee (per session)</label>
@@ -320,8 +307,6 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               service_fee: form.service_fee || '0',
               service_charge: form.service_charge || '0',
               bill_prefix: form.bill_prefix || 'INV',
-              bill_format: form.bill_format || 'thermal_80mm',
-              print_device_name: form.print_device_name || '',
             })}
           >
             {savingSection === 'Branding' ? 'Saving...' : 'Save Branding'}
@@ -479,6 +464,209 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
           >
             {savingSection === 'Backend Sync' ? 'Saving...' : 'Save Backend Sync'}
           </button>
+        </div>
+      )}
+
+      {activeTab === 'printers' && (
+        <div className="settings-card">
+          <h2>Printers</h2>
+          <div className="form-group">
+            <label>Printer Type</label>
+            <div className="radio-row">
+              <label>
+                <input
+                  type="radio"
+                  name="printer_type"
+                  value="system"
+                  checked={(form.printer_type || 'system') === 'system'}
+                  onChange={(e) => updateField('printer_type', e.target.value)}
+                />
+                System Printer
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="printer_type"
+                  value="network"
+                  checked={form.printer_type === 'network'}
+                  onChange={(e) => updateField('printer_type', e.target.value)}
+                />
+                Network (TCP/IP)
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="printer_type"
+                  value="bluetooth"
+                  checked={form.printer_type === 'bluetooth'}
+                  onChange={(e) => updateField('printer_type', e.target.value)}
+                />
+                Bluetooth (COM)
+              </label>
+            </div>
+          </div>
+
+          <hr style={{ border: 'none', borderTop: '1px solid #333', margin: '16px 0' }} />
+
+          <div className="form-group">
+            <label>Print Format</label>
+            <select value={form.bill_format || 'thermal_80mm'} onChange={(e) => updateField('bill_format', e.target.value)}>
+              <option value="thermal_80mm">Thermal</option>
+              <option value="a4">A4</option>
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label>Paper Width</label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                <input type="radio" name="paper_width_opt" checked={form.paper_width === '80' || !form.paper_width} onChange={() => updateField('paper_width', '80')} />
+                80mm
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                <input type="radio" name="paper_width_opt" checked={form.paper_width === '58'} onChange={() => updateField('paper_width', '58')} />
+                58mm
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12 }}>
+                <input type="radio" name="paper_width_opt" checked={form.paper_width !== '80' && form.paper_width !== '58' && form.paper_width} onChange={() => updateField('paper_width', '')} />
+                Custom
+              </label>
+              <input type="number" min="30" max="120" value={(form.paper_width !== '80' && form.paper_width !== '58' && form.paper_width) ? form.paper_width : ''} onChange={(e) => updateField('paper_width', e.target.value)} placeholder="mm" style={{ width: 64, display: (form.paper_width !== '80' && form.paper_width !== '58') ? 'inline-block' : 'none' }} />
+            </div>
+          </div>
+
+          {form.printer_type === 'system' && (
+            <>
+              <div className="form-group">
+                <label>Printer</label>
+                <select value={form.print_device_name || ''} onChange={(e) => updateField('print_device_name', e.target.value)}>
+                  <option value="">— Default printer —</option>
+                  {printers.map((p) => (
+                    <option key={p.name} value={p.name}>{p.displayName || p.name}</option>
+                  ))}
+                </select>
+              </div>
+            </>
+          )}
+
+          {form.printer_type === 'network' && (
+            <>
+              <div className="form-group">
+                <label>IP Address</label>
+                <input value={form.printer_network_ip || ''} onChange={(e) => updateField('printer_network_ip', e.target.value)} placeholder="192.168.1.100" />
+              </div>
+              <div className="form-group">
+                <label>Port</label>
+                <input type="number" min="1" max="65535" value={form.printer_network_port || '9100'} onChange={(e) => updateField('printer_network_port', e.target.value)} placeholder="9100" />
+              </div>
+            </>
+          )}
+
+          {form.printer_type === 'bluetooth' && (
+            <div className="form-group">
+              <label>Bluetooth Printer</label>
+              <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11, whiteSpace: 'nowrap' }}
+                  disabled={btScanning}
+                  onClick={async () => {
+                    setBtScanning(true);
+                    try {
+                      const devices = await bluetoothScan();
+                      setBtDevices(devices || []);
+                      addToast(`Found ${(devices||[]).length} device(s)`, 'success');
+                    } catch (e) {
+                      addToast(`Scan failed: ${e.message}`, 'error');
+                    } finally {
+                      setBtScanning(false);
+                    }
+                  }}
+                >{btScanning ? 'Scanning...' : '🔍 Scan'}</button>
+              </div>
+              {btDevices.length > 0 && (
+                <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6, marginBottom: 6 }}>
+                  {btDevices.map((d, i) => {
+                    const selected = form.bt_printer_address && (form.bt_printer_address === d.address || form.bt_printer_address === d.macAddress);
+                    return (
+                    <div key={d.address || d.macAddress || i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderBottom: i < btDevices.length - 1 ? '1px solid var(--border)' : 'none', background: selected ? 'var(--accent-bg)' : 'transparent' }}>
+                      <span style={{ flex: 1, fontSize: 12 }}>
+                        <strong>{d.name || 'Unknown'}</strong>
+                        <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>{d.macAddress || d.address}</span>
+                        {d.com_port && <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>({d.com_port})</span>}
+                        {selected && <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--success)' }}>✓ Selected</span>}
+                      </span>
+                      {d.address && (
+                        selected ? (
+                          <button className="btn ghost" style={{ padding: '2px 8px', fontSize: 10, color: 'var(--danger)' }}
+                            onClick={async () => {
+                              try {
+                                await bluetoothDisconnect(d.address);
+                                updateField('bt_printer_address', '');
+                                updateField('bt_printer_name', '');
+                                addToast('Disconnected', 'success');
+                              } catch (e) {
+                                addToast(`Disconnect failed: ${e.message}`, 'error');
+                              }
+                            }}
+                          >Disconnect</button>
+                        ) : (
+                          <button className="btn ghost" style={{ padding: '2px 8px', fontSize: 10, color: 'var(--primary)' }}
+                            onClick={async () => {
+                              try {
+                                await bluetoothConnect(d.address);
+                                updateField('bt_printer_address', d.address);
+                                updateField('bt_printer_name', d.name || '');
+                                addToast(`Connected to ${d.name || d.address}`, 'success');
+                              } catch (e) {
+                                addToast(`Connect failed: ${e.message}`, 'error');
+                              }
+                            }}
+                          >Connect</button>
+                        )
+                      )}
+                    </div>
+                    );
+                  })}
+                </div>
+              )}
+              {btDevices.length === 0 && (
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Click <strong>Scan</strong> to discover nearby Bluetooth printers.
+                </p>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+            <button
+              className="btn primary"
+              disabled={savingSection === 'Printers'}
+              onClick={() => saveSection('Printers', {
+                printer_type: form.printer_type || 'system',
+                printer_network_ip: form.printer_network_ip || '',
+                printer_network_port: form.printer_network_port || '9100',
+                bt_printer_address: form.bt_printer_address || '',
+                bt_printer_name: form.bt_printer_name || '',
+                bill_format: form.bill_format || 'thermal_80mm',
+                print_device_name: form.print_device_name || '',
+                paper_width: form.paper_width || '80',
+              })}
+            >
+              {savingSection === 'Printers' ? 'Saving...' : 'Save Printers'}
+            </button>
+            <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11 }}
+              onClick={async () => {
+                const type = form.printer_type || 'system';
+                const result = await testPrinter({
+                  printerType: type,
+                  ip: form.printer_network_ip,
+                  port: form.printer_network_port,
+                  comName: form.bt_printer_address,
+                });
+                if (result.success) addToast('Test page sent to printer', 'success');
+                else addToast(`Test failed: ${result.failureReason || result.reason}`, 'error');
+              }}
+            >Test Print</button>
+          </div>
         </div>
       )}
 

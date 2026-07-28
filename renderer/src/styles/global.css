@@ -960,7 +960,8 @@ body {
 }
 .bill-preview-iframe {
   display: block;
-  /* width: 85mm; */
+  width: auto;
+  max-width: 100%;
   height: 450px;
   border: none;
   margin: 0 auto;

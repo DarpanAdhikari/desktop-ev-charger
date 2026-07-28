@@ -6,6 +6,8 @@ const { CsmsClient } = require('./services/wsClient');
 const syncWorker = require('./services/syncWorker');
 const { printBill } = require('./services/printService');
 const { renderBillHtml, setCachedTemplate } = require('./services/billTemplate');
+const escposPrinter = require('./services/escposPrinter');
+const bluetoothPrinter = require('./services/bluetoothPrinter');
 const { validateWsUrl } = require('./utils');
 
 let mainWindow;
@@ -123,6 +125,11 @@ app.whenReady().then(() => {
     }).then(r => r.ok && r.text()).then(html => { if (html) setCachedTemplate(html); }).catch(() => {});
   }
 
+  bluetoothPrinter.registerBluetoothHandlers();
+  if (startupSettings.bt_printer_address) {
+    bluetoothPrinter.reconnectBluetoothPrinter(startupSettings.bt_printer_address);
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -131,6 +138,7 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   syncWorker.stop();
   if (csms) csms.disconnect();
+  bluetoothPrinter.cleanupBluetoothDaemons();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -260,14 +268,34 @@ ipcMain.handle('bills:list', (_e, { limit } = {}) =>
     .all(limit || 100)
 );
 
-ipcMain.handle('bills:print', async (_e, { billId, deviceName }) => {
+ipcMain.handle('bills:print', async (_e, { billId, deviceName } = {}) => {
   const raw = db.raw;
   const bill = raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
+  if (!bill) return { success: false, reason: 'bill_not_found' };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
   const html = renderBillHtml(bill, tx, settings);
-  const result = await printBill(bill, html, deviceName);
-  return { ...result, bill: raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId) };
+
+  const printerType = settings.printer_type || 'system';
+  const targetDots = escposPrinter.targetDotsFromPaperWidth(settings.paper_width);
+  try {
+    let result;
+    if (printerType === 'network') {
+      const ip = settings.printer_network_ip;
+      const port = parseInt(settings.printer_network_port || '9100', 10);
+      if (!ip) return { success: false, reason: 'Network printer IP not configured' };
+      result = await escposPrinter.printImageToNetwork(html, ip, port, targetDots);
+    } else if (printerType === 'bluetooth') {
+      const addr = settings.bt_printer_address;
+      if (!addr) return { success: false, reason: 'Bluetooth printer not configured' };
+      result = await escposPrinter.printImageToBluetooth(html, addr, targetDots);
+    } else {
+      result = await printBill(bill, html, deviceName);
+    }
+    return { ...result, bill: raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId) };
+  } catch (err) {
+    return { success: false, failureReason: err.message };
+  }
 });
 
 ipcMain.handle('bill:generatePdf', async (_e, arg) => {
@@ -317,7 +345,7 @@ ipcMain.handle('bill:generateImage', async (_e, arg) => {
   const settings = db.getSettings();
   const html = renderBillHtml(bill, tx, settings);
   const imgWin = new BrowserWindow({
-    show: false, width: 400, height: 800,
+    show: false, width: 800, height: 800,
     webPreferences: { contextIsolation: true }
   });
   try {
@@ -423,6 +451,48 @@ ipcMain.handle('printers:list', async () => {
     return await mainWindow.webContents.getPrintersAsync();
   }
   return [];
+});
+
+ipcMain.handle('printers:listCom', async () => {
+  return escposPrinter.listComPorts();
+});
+
+ipcMain.handle('printers:test', async (_e, { printerType, ip, port, comName } = {}) => {
+  const settings = db.getSettings();
+  const type = printerType || settings.printer_type || 'system';
+  try {
+    let result;
+    if (type === 'network') {
+      const targetIp = ip || settings.printer_network_ip;
+      const targetPort = parseInt(port || settings.printer_network_port || '9100', 10);
+      if (!targetIp) return { success: false, reason: 'IP not provided' };
+      const payload = escposPrinter.buildTestPayload();
+      result = await escposPrinter.sendBufferToNetwork(payload, targetIp, targetPort);
+    } else if (type === 'bluetooth') {
+      const targetAddr = comName || settings.bt_printer_address;
+      if (!targetAddr) return { success: false, reason: 'Bluetooth printer not configured' };
+      const payload = escposPrinter.buildTestPayload();
+      const b64 = payload.toString('base64');
+      const bluetoothPrinter = require('./services/bluetoothPrinter');
+      result = await bluetoothPrinter.sendToBluetooth(targetAddr, b64);
+      if (!result.success) result.failureReason = result.failureReason || result.error || result.reason || 'Unknown error';
+    } else {
+      const testHtml = `<!doctype html><html><head><meta charset="utf-8"><style>
+        body { font-family: 'Courier New', monospace; margin: 0; padding: 4mm; text-align: center; }
+        h1 { font-size: 18px; } p { font-size: 11px; }
+      </style></head><body>
+        <h1>Test Print</h1>
+        <p>DRP Dynamic Recharge Platform</p>
+        <p>&copy; Darpan Adhikari</p>
+        <p>https://darpanadhikari.com.np</p>
+      </body></html>`;
+      result = await printBill({ id: 0 }, testHtml, null);
+    }
+    if (!result.success) result.failureReason = result.failureReason || result.error || result.reason || 'Unknown error';
+    return { ...result, message: 'Test page sent to printer' };
+  } catch (err) {
+    return { success: false, failureReason: err.message };
+  }
 });
 
 // ── Transactions history ──
