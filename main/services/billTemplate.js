@@ -1,3 +1,21 @@
+const path = require('path');
+const fs = require('fs');
+
+let _defaultLogoBase64 = null;
+function getDefaultLogoBase64() {
+  if (_defaultLogoBase64 !== null) return _defaultLogoBase64;
+  try {
+    const logoPath = path.join(__dirname, '../../assets/logo/logo.png');
+    if (!fs.existsSync(logoPath)) { _defaultLogoBase64 = ''; return ''; }
+    const data = fs.readFileSync(logoPath);
+    _defaultLogoBase64 = `data:image/png;base64,${data.toString('base64')}`;
+    return _defaultLogoBase64;
+  } catch (e) {
+    _defaultLogoBase64 = '';
+    return '';
+  }
+}
+
 function formatDuration(sec) {
   if (!sec || sec <= 0) return '-';
   const h = Math.floor(sec / 3600);
@@ -36,7 +54,7 @@ function renderBillHtmlOriginal(bill, tx, settings) {
   const created = new Date(bill.created_at).toLocaleString();
   const company = settings.company_name || 'Company';
   const showLogo = settings.show_logo_on_bill === '1';
-  const logoData = showLogo ? (settings.invoice_logo || settings.branding_logo || '') : '';
+  const logoData = showLogo ? (settings.invoice_logo || settings.branding_logo || getDefaultLogoBase64()) : '';
 
   return `<!doctype html>
 <html>
@@ -112,7 +130,7 @@ function renderBillHtmlEnhanced(bill, tx, settings) {
   const width = isThermal ? getPrintableWidth(settings) : '210mm';
 
   const showLogo = settings.show_logo_on_bill === '1';
-  const logoData = showLogo ? (settings.invoice_logo || settings.branding_logo || '') : '';
+  const logoData = showLogo ? (settings.invoice_logo || settings.branding_logo || getDefaultLogoBase64()) : '';
 
   const company = settings.company_name || 'Company';
 
@@ -257,6 +275,12 @@ function renderBillHtmlRemote(bill, tx, settings) {
     duration_sec: tx.duration_sec != null ? formatDuration(tx.duration_sec) : '-',
     soc_delta: bill.soc_start != null && bill.soc_end != null ? String(bill.soc_end - bill.soc_start) : '',
     rate_name: bill.rate_name || '',
+    show_logo_on_bill: settings.show_logo_on_bill || '0',
+    invoice_logo: settings.invoice_logo || '',
+    branding_logo: settings.branding_logo || '',
+    logo_data: settings.show_logo_on_bill === '1'
+      ? (settings.invoice_logo || settings.branding_logo || getDefaultLogoBase64())
+      : '',
   };
   for (const [key, val] of Object.entries(ctx)) {
     html = html.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'gi'), val);
@@ -264,10 +288,170 @@ function renderBillHtmlRemote(bill, tx, settings) {
   return html;
 }
 
-function renderBillHtml(bill, tx, settings) {
+function renderBillHtmlProfessional(bill, tx, settings) {
+  const isThermal = settings.bill_format === 'thermal_80mm';
+  const width = isThermal ? getPrintableWidth(settings) : '210mm';
+  const company = settings.company_name || 'Company';
+  const showLogo = settings.show_logo_on_bill === '1';
+  const logoData = showLogo ? (settings.invoice_logo || settings.branding_logo || getDefaultLogoBase64()) : '';
+
+  const hasSoC = bill.soc_start != null || bill.soc_end != null;
+  const socDelta = hasSoC && bill.soc_start != null && bill.soc_end != null ? bill.soc_end - bill.soc_start : null;
+  const hasCustomer = bill.customer_name || bill.customer_id;
+  const hasServiceFee = bill.service_fee && parseFloat(bill.service_fee) > 0;
+  const hasServiceCharge = bill.service_charge && parseFloat(bill.service_charge) > 0;
+  const hasTax = bill.tax_amount && parseFloat(bill.tax_amount) > 0;
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: ${width} auto; margin: ${isThermal ? '4mm' : '15mm'}; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    color: #1a1a1a; max-width: ${width}; margin: 0 auto; padding: ${isThermal ? '4px' : '0'};
+    font-size: ${isThermal ? '9px' : '11px'}; line-height: 1.6;
+  }
+  .header {
+    padding-bottom: ${isThermal ? '8px' : '20px'};
+    border-bottom: ${isThermal ? '1px' : '2px'} solid #e8e8e8;
+    margin-bottom: ${isThermal ? '8px' : '24px'};
+  }
+  .header-row {
+    display: flex;
+    align-items: center;
+    ${logoData ? '' : 'justify-content: center;'}
+  }
+  .logo-side { flex-shrink: 0; margin-right: ${isThermal ? '8px' : '16px'}; }
+  .logo-side img { max-width: ${isThermal ? '40px' : '64px'}; max-height: ${isThermal ? '40px' : '64px'}; display: block; }
+  .company-info { ${logoData ? 'flex: 1;' : ''} text-align: center; }
+  .company-name { font-size: ${isThermal ? '12px' : '18px'}; font-weight: 700; color: #1a1a2e; }
+  .company-detail { font-size: ${isThermal ? '8px' : '10px'}; color: #666; line-height: 1.4; }
+  .invoice-row { text-align: center; margin-top: ${isThermal ? '6px' : '12px'}; }
+  .invoice-label { font-size: ${isThermal ? '12px' : '16px'}; font-weight: 800; color: #1a1a2e; letter-spacing: 0.5px; }
+  .invoice-number { font-size: ${isThermal ? '9px' : '12px'}; font-weight: 600; color: #333; }
+  .invoice-date { font-size: ${isThermal ? '8px' : '10px'}; color: #888; }
+  .info-grid {
+    display: flex; ${isThermal ? 'flex-direction: column;' : ''} justify-content: space-between;
+    margin-bottom: ${isThermal ? '8px' : '24px'};
+    padding: ${isThermal ? '8px' : '16px'}; background: #f8f9fa; border-radius: ${isThermal ? '4px' : '8px'};
+  }
+  .info-col h3 { font-size: ${isThermal ? '8px' : '10px'}; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin-bottom: ${isThermal ? '2px' : '6px'}; }
+  .info-col p { font-size: ${isThermal ? '9px' : '11px'}; color: #333; margin: ${isThermal ? '1px' : '2px'} 0; }
+  .section-title { font-size: ${isThermal ? '10px' : '12px'}; font-weight: 700; color: #1a1a2e; margin-bottom: ${isThermal ? '4px' : '8px'}; }
+  table { width: 100%; border-collapse: collapse; margin: ${isThermal ? '4px' : '12px'} 0; }
+  thead th {
+    background: #1a1a2e; color: #fff; padding: ${isThermal ? '4px 6px' : '10px 14px'};
+    font-size: ${isThermal ? '8px' : '10px'}; text-transform: uppercase; letter-spacing: 0.5px;
+    text-align: left; font-weight: 600;
+  }
+  thead th.right { text-align: right; }
+  tbody td { padding: ${isThermal ? '4px 6px' : '10px 14px'}; border-bottom: 1px solid #eee; font-size: ${isThermal ? '9px' : '11px'}; }
+  tbody td.right { text-align: right; font-weight: 600; }
+  tbody td.sub { color: #888; font-size: ${isThermal ? '8px' : '10px'}; }
+  .total-row { background: #1a1a2e; }
+  .total-row td { color: #fff; font-size: ${isThermal ? '12px' : '16px'}; font-weight: 700; padding: ${isThermal ? '6px 8px' : '14px 16px'}; border: none; }
+  .total-row td.right { text-align: right; }
+  .soc-line { margin-top: ${isThermal ? '4px' : '12px'}; font-size: ${isThermal ? '8px' : '10px'}; color: #888; }
+  .footer { text-align: center; margin-top: ${isThermal ? '8px' : '32px'}; padding-top: ${isThermal ? '6px' : '16px'}; border-top: 1px solid #e8e8e8; font-size: ${isThermal ? '8px' : '10px'}; color: #888; line-height: 1.6; }
+  .footer .thanks { font-size: ${isThermal ? '10px' : '13px'}; font-weight: 600; color: #1a1a2e; margin-bottom: ${isThermal ? '2px' : '4px'}; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-row">
+      ${logoData ? `<div class="logo-side"><img src="${logoData}" alt="Logo" /></div>` : ''}
+      <div class="company-info">
+        <div class="company-name">${company}</div>
+        ${settings.company_address ? `<div class="company-detail">${settings.company_address}</div>` : ''}
+        ${settings.company_phone ? `<div class="company-detail">${settings.company_phone}</div>` : ''}
+        ${settings.company_email ? `<div class="company-detail">${settings.company_email}</div>` : ''}
+      </div>
+    </div>
+    <div class="invoice-row">
+      <div class="invoice-label">INVOICE</div>
+      <div class="invoice-number">${bill.bill_number} <span class="invoice-date">${formatDate(bill.created_at)}</span></div>
+    </div>
+  </div>
+
+  <div class="info-grid">
+    <div class="info-col">
+      <h3>Bill To</h3>
+      ${hasCustomer
+        ? `<p>${bill.customer_name || ''}${bill.customer_id ? ` (${bill.customer_id})` : ''}</p>`
+        : '<p>—</p>'}
+      ${bill.customer_pan ? `<p>PAN: ${bill.customer_pan}</p>` : ''}
+      ${bill.customer_vehicle ? `<p>Vehicle: ${bill.customer_vehicle}</p>` : ''}
+    </div>
+    <div class="info-col" style="${isThermal ? '' : 'text-align:right'}">
+      <h3>Session</h3>
+      <p>${tx.charger_id} · Connector ${tx.connector_id}</p>
+      <p>Duration: ${formatDuration(tx.duration_sec)}</p>
+      <p>${formatDate(tx.started_at)} — ${formatDate(tx.stopped_at)}</p>
+    </div>
+  </div>
+
+  <div class="section-title">Charging Details</div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:44%">Description</th>
+        <th style="width:22%">Details</th>
+        <th class="right" style="width:16%">Rate</th>
+        <th class="right" style="width:18%">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Energy Charged</td>
+        <td>${(bill.energy_kwh || 0).toFixed(3)} kWh</td>
+        <td class="right">${(bill.rate_per_kwh || 0).toFixed(2)}</td>
+        <td class="right">${(bill.subtotal || 0).toFixed(2)}</td>
+      </tr>
+      ${bill.rate_name ? `<tr><td class="sub" colspan="4">Rate Plan: ${bill.rate_name}</td></tr>` : ''}
+      ${hasServiceFee ? `<tr><td>Service Fee</td><td>—</td><td class="right">—</td><td class="right">${(bill.service_fee || 0).toFixed(2)}</td></tr>` : ''}
+      ${hasServiceCharge ? `<tr><td>Service Charge</td><td>—</td><td class="right">—</td><td class="right">${(bill.service_charge || 0).toFixed(2)}</td></tr>` : ''}
+      ${hasTax ? `<tr><td>Tax (${bill.tax_percent || 0}%)</td><td>—</td><td class="right">—</td><td class="right">${(bill.tax_amount || 0).toFixed(2)}</td></tr>` : ''}
+    </tbody>
+  </table>
+
+  <table>
+    <tbody>
+      <tr class="total-row">
+        <td style="width:82%">Total Amount</td>
+        <td class="right" style="width:18%">${(bill.total || 0).toFixed(2)}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  ${hasSoC ? `<div class="soc-line">SoC: ${bill.soc_start != null ? bill.soc_start + '%' : '-'} → ${bill.soc_end != null ? bill.soc_end + '%' : '-'}${socDelta != null ? ' (+' + socDelta + '%)' : ''}</div>` : ''}
+
+  <div class="footer">
+    <div class="thanks">Thank you for charging with ${company}!</div>
+    ${settings.company_phone ? `<div>${settings.company_phone}</div>` : ''}
+    ${settings.company_email ? `<div>${settings.company_email}</div>` : ''}
+    <div style="margin-top:4px;font-size:9px;">&copy; Darpan Adhikari (https://darpanadhikari.com.np)</div>
+  </div>
+</body>
+</html>`;
+}
+
+function renderBillHtml(bill, tx, settings, displayFormat) {
   if (_cachedTemplate) {
     return renderBillHtmlRemote(bill, tx, settings);
   }
+  if (displayFormat === 'professional') {
+    return renderBillHtmlProfessional(bill, tx, settings);
+  }
+  if (displayFormat === 'enhanced') {
+    return renderBillHtmlEnhanced(bill, tx, settings);
+  }
+  if (displayFormat === 'original') {
+    return renderBillHtmlOriginal(bill, tx, settings);
+  }
+  // Fallback for thermal printers (no displayFormat passed)
   if (settings.use_new_bill_format === '1') {
     return renderBillHtmlEnhanced(bill, tx, settings);
   }

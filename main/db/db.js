@@ -49,8 +49,9 @@ function runMigrations() {
   const missingKeys = {
     branding_logo: '',
     invoice_logo: '',
-    show_logo_on_bill: '0',
+    show_logo_on_bill: '1',
     use_new_bill_format: '0',
+    bill_display_format: 'professional',
     service_fee: '0',
     service_charge: '0',
     company_address: '',
@@ -60,6 +61,7 @@ function runMigrations() {
     api_company_info_endpoint: '',
     api_bill_format_endpoint: '',
     printer_type: 'system',
+    thermal_print_mode: 'raster',
     printer_network_ip: '',
     printer_network_port: '9100',
     printer_bt_com: '',
@@ -96,7 +98,7 @@ function seedDefaults() {
     default_battery_capacity_kwh: '',
     branding_logo: '',
     invoice_logo: '',
-    show_logo_on_bill: '0',
+    show_logo_on_bill: '1',
     service_fee: '0',
     service_charge: '0',
     company_address: '',
@@ -106,12 +108,14 @@ function seedDefaults() {
     api_company_info_endpoint: '',
     api_bill_format_endpoint: '',
     printer_type: 'system',
+    thermal_print_mode: 'raster',
     printer_network_ip: '',
     printer_network_port: '9100',
     printer_bt_com: '',
     bt_printer_address: '',
     bt_printer_name: '',
-    paper_width: '80'
+    paper_width: '80',
+    bill_display_format: 'professional'
   };
   const insert = db.prepare(
     'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'

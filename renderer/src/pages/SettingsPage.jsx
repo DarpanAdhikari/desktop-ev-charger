@@ -267,15 +267,40 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               />
               <label htmlFor="show_logo" style={{ margin: 0, cursor: 'pointer', fontSize: 12 }}>Show logo on invoice</label>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-              <input
-                type="checkbox"
-                id="use_new_format"
-                checked={form.use_new_bill_format === '1'}
-                onChange={(e) => updateField('use_new_bill_format', e.target.checked ? '1' : '0')}
-                style={{ width: 'auto', accentColor: 'var(--amber)' }}
-              />
-              <label htmlFor="use_new_format" style={{ margin: 0, cursor: 'pointer', fontSize: 12 }}>Use enhanced invoice format</label>
+            <div className="form-group" style={{ marginTop: 8 }}>
+              <label>Screen / Print Format</label>
+              <div className="radio-row" style={{ flexWrap: 'wrap' }}>
+                <label>
+                  <input
+                    type="radio"
+                    name="bill_display_format"
+                    value="professional"
+                    checked={(form.bill_display_format || 'professional') === 'professional'}
+                    onChange={(e) => updateField('bill_display_format', e.target.value)}
+                  />
+                  Professional
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="bill_display_format"
+                    value="enhanced"
+                    checked={form.bill_display_format === 'enhanced'}
+                    onChange={(e) => updateField('bill_display_format', e.target.value)}
+                  />
+                  Enhanced
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="bill_display_format"
+                    value="original"
+                    checked={form.bill_display_format === 'original'}
+                    onChange={(e) => updateField('bill_display_format', e.target.value)}
+                  />
+                  Original
+                </label>
+              </div>
             </div>
           </div>
           <div className="form-group">
@@ -303,7 +328,7 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               branding_logo: form.branding_logo || '',
               invoice_logo: form.invoice_logo || '',
               show_logo_on_bill: form.show_logo_on_bill || '0',
-              use_new_bill_format: form.use_new_bill_format || '0',
+              bill_display_format: form.bill_display_format || 'professional',
               service_fee: form.service_fee || '0',
               service_charge: form.service_charge || '0',
               bill_prefix: form.bill_prefix || 'INV',
@@ -535,6 +560,34 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             </div>
           </div>
 
+          {(form.printer_type === 'network' || form.printer_type === 'bluetooth') && (
+            <div className="form-group">
+              <label>Thermal Print Mode</label>
+              <div className="radio-row">
+                <label>
+                  <input
+                    type="radio"
+                    name="thermal_print_mode"
+                    value="raster"
+                    checked={(form.thermal_print_mode || 'raster') === 'raster'}
+                    onChange={(e) => updateField('thermal_print_mode', e.target.value)}
+                  />
+                  Raster (logo + format)
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="thermal_print_mode"
+                    value="text"
+                    checked={form.thermal_print_mode === 'text'}
+                    onChange={(e) => updateField('thermal_print_mode', e.target.value)}
+                  />
+                  Text (plain, fast)
+                </label>
+              </div>
+            </div>
+          )}
+
           {form.printer_type === 'system' && (
             <>
               <div className="form-group">
@@ -646,6 +699,7 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
                 printer_network_port: form.printer_network_port || '9100',
                 bt_printer_address: form.bt_printer_address || '',
                 bt_printer_name: form.bt_printer_name || '',
+                thermal_print_mode: form.thermal_print_mode || 'raster',
                 bill_format: form.bill_format || 'thermal_80mm',
                 print_device_name: form.print_device_name || '',
                 paper_width: form.paper_width || '80',

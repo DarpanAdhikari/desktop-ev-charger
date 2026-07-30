@@ -274,22 +274,34 @@ ipcMain.handle('bills:print', async (_e, { billId, deviceName } = {}) => {
   if (!bill) return { success: false, reason: 'bill_not_found' };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
-  const html = renderBillHtml(bill, tx, settings);
-
   const printerType = settings.printer_type || 'system';
-  const targetDots = escposPrinter.targetDotsFromPaperWidth(settings.paper_width);
+  const displayFormat = settings.bill_display_format || 'professional';
   try {
     let result;
     if (printerType === 'network') {
       const ip = settings.printer_network_ip;
       const port = parseInt(settings.printer_network_port || '9100', 10);
       if (!ip) return { success: false, reason: 'Network printer IP not configured' };
-      result = await escposPrinter.printImageToNetwork(html, ip, port, targetDots);
+      if ((settings.thermal_print_mode || 'raster') === 'text') {
+        result = await escposPrinter.printTextToNetwork(bill, tx, settings, ip, port);
+      } else {
+        const html = renderBillHtml(bill, tx, settings, displayFormat);
+        const dots = escposPrinter.targetDotsFromPaperWidth(settings.paper_width);
+        result = await escposPrinter.printImageToNetwork(html, ip, port, dots);
+      }
     } else if (printerType === 'bluetooth') {
       const addr = settings.bt_printer_address;
       if (!addr) return { success: false, reason: 'Bluetooth printer not configured' };
-      result = await escposPrinter.printImageToBluetooth(html, addr, targetDots);
+      if ((settings.thermal_print_mode || 'raster') === 'text') {
+        result = await escposPrinter.printTextToBluetooth(bill, tx, settings, addr);
+      } else {
+        const html = renderBillHtml(bill, tx, settings, displayFormat);
+        const dots = escposPrinter.targetDotsFromPaperWidth(settings.paper_width);
+        result = await escposPrinter.printImageToBluetooth(html, addr, dots);
+      }
     } else {
+      // System/A4 printer: full-page HTML printing
+      const html = renderBillHtml(bill, tx, settings, displayFormat);
       result = await printBill(bill, html, deviceName);
     }
     return { ...result, bill: raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId) };
@@ -305,7 +317,7 @@ ipcMain.handle('bill:generatePdf', async (_e, arg) => {
   if (!bill) return { success: false, reason: 'bill_not_found' };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
-  const html = renderBillHtml(bill, tx, settings);
+  const html = renderBillHtml(bill, tx, settings, settings.bill_display_format || 'professional');
   const pdfWin = new BrowserWindow({
     show: false,
     webPreferences: { contextIsolation: true }
@@ -332,7 +344,7 @@ ipcMain.handle('bill:previewHtml', async (_e, arg) => {
   if (!bill) return { html: null, bill_number: null };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
-  const html = renderBillHtml(bill, tx, settings);
+  const html = renderBillHtml(bill, tx, settings, settings.bill_display_format || 'professional');
   return { html, bill_number: bill.bill_number };
 });
 
@@ -343,7 +355,7 @@ ipcMain.handle('bill:generateImage', async (_e, arg) => {
   if (!bill) return { success: false, reason: 'bill_not_found' };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
-  const html = renderBillHtml(bill, tx, settings);
+  const html = renderBillHtml(bill, tx, settings, settings.bill_display_format || 'professional');
   const imgWin = new BrowserWindow({
     show: false, width: 800, height: 800,
     webPreferences: { contextIsolation: true }
