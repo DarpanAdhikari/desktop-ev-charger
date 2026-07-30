@@ -48,7 +48,7 @@ function getPrintableWidth(settings) {
   return Math.max(pw - 4, 30) + 'mm';
 }
 
-function renderBillHtmlOriginal(bill, tx, settings) {
+function renderBillHtmlOriginal(bill, tx, settings, forPrint = true) {
   const isThermal = settings.bill_format === 'thermal_80mm';
   const width = isThermal ? getPrintableWidth(settings) : '210mm';
   const created = new Date(bill.created_at).toLocaleString();
@@ -120,12 +120,12 @@ function renderBillHtmlOriginal(bill, tx, settings) {
   <hr>
   <div class="foot">${company} — Thank you</div>
   <hr>
-  <div class="foot">&copy;Darpan Adhikari (https://darpanadhikari.com.np)</div>
+  ${forPrint ? `<div class="foot">${settings.company_footer || '&copy;Darpan Adhikari (https://darpanadhikari.com.np)'}</div>` : ''}
 </body>
 </html>`;
 }
 
-function renderBillHtmlEnhanced(bill, tx, settings) {
+function renderBillHtmlEnhanced(bill, tx, settings, forPrint = true) {
   const isThermal = settings.bill_format === 'thermal_80mm';
   const width = isThermal ? getPrintableWidth(settings) : '210mm';
 
@@ -154,7 +154,7 @@ function renderBillHtmlEnhanced(bill, tx, settings) {
 <style>
   @page { size: ${width} auto; margin: ${isThermal ? '4mm' : '14mm'}; }
   body { font-family: 'Courier New', monospace; font-size: ${isThermal ? '11px' : '13px'};
-         color: #111; width: ${width}; margin: 0; padding: ${isThermal ? '6px' : '10px 0'}; }
+         color: #111; width: ${width}; margin: 0; padding: ${isThermal ? '6px' : '10px 6px'}; }
   .bill-header {
     display: grid;
     grid-template-columns: 13% 68%;
@@ -234,7 +234,7 @@ function renderBillHtmlEnhanced(bill, tx, settings) {
   <hr>
   <div class="foot">${company} — Thank you</div>
   <hr>
-  <div class="foot">&copy;Darpan Adhikari (https://darpanadhikari.com.np)</div>
+  ${forPrint ? `<div class="foot">${settings.company_footer || '&copy;Darpan Adhikari (https://darpanadhikari.com.np)'}</div>` : ''}
 </body>
 </html>`;
 }
@@ -288,7 +288,7 @@ function renderBillHtmlRemote(bill, tx, settings) {
   return html;
 }
 
-function renderBillHtmlProfessional(bill, tx, settings) {
+function renderBillHtmlProfessional(bill, tx, settings, forPrint = true) {
   const isThermal = settings.bill_format === 'thermal_80mm';
   const width = isThermal ? getPrintableWidth(settings) : '210mm';
   const company = settings.company_name || 'Company';
@@ -432,30 +432,30 @@ function renderBillHtmlProfessional(bill, tx, settings) {
     <div class="thanks">Thank you for charging with ${company}!</div>
     ${settings.company_phone ? `<div>${settings.company_phone}</div>` : ''}
     ${settings.company_email ? `<div>${settings.company_email}</div>` : ''}
-    <div style="margin-top:4px;font-size:9px;">&copy; Darpan Adhikari (https://darpanadhikari.com.np)</div>
+    ${forPrint ? `<div style="margin-top:4px;font-size:9px;">${settings.company_footer || '&copy; Darpan Adhikari (https://darpanadhikari.com.np)'}</div>` : ''}
   </div>
 </body>
 </html>`;
 }
 
-function renderBillHtml(bill, tx, settings, displayFormat) {
-  if (_cachedTemplate) {
+function renderBillHtml(bill, tx, settings, displayFormat, forPrint = true) {
+  if (_cachedTemplate && displayFormat === 'custom') {
     return renderBillHtmlRemote(bill, tx, settings);
   }
   if (displayFormat === 'professional') {
-    return renderBillHtmlProfessional(bill, tx, settings);
+    return renderBillHtmlProfessional(bill, tx, settings, forPrint);
   }
   if (displayFormat === 'enhanced') {
-    return renderBillHtmlEnhanced(bill, tx, settings);
+    return renderBillHtmlEnhanced(bill, tx, settings, forPrint);
   }
   if (displayFormat === 'original') {
-    return renderBillHtmlOriginal(bill, tx, settings);
+    return renderBillHtmlOriginal(bill, tx, settings, forPrint);
   }
   // Fallback for thermal printers (no displayFormat passed)
   if (settings.use_new_bill_format === '1') {
-    return renderBillHtmlEnhanced(bill, tx, settings);
+    return renderBillHtmlEnhanced(bill, tx, settings, forPrint);
   }
-  return renderBillHtmlOriginal(bill, tx, settings);
+  return renderBillHtmlOriginal(bill, tx, settings, forPrint);
 }
 
 module.exports = { renderBillHtml, setCachedTemplate };

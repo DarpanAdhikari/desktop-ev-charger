@@ -225,6 +225,11 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             <input value={form.company_email || ''} onChange={(e) => updateField('company_email', e.target.value)} />
           </div>
           <div className="form-group">
+            <label>Print Footer</label>
+            <input value={form.company_footer || ''} onChange={(e) => updateField('company_footer', e.target.value)} placeholder="e.g. © My Company (https://example.com)" />
+            <p style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>Shown at bottom of printed bills only (not in preview)</p>
+          </div>
+          <div className="form-group">
             <label>Branding Logo</label>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               {form.branding_logo ? (
@@ -300,7 +305,22 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
                   />
                   Original
                 </label>
+                {form.api_bill_format_endpoint && (
+                  <label>
+                    <input
+                      type="radio"
+                      name="bill_display_format"
+                      value="custom"
+                      checked={form.bill_display_format === 'custom'}
+                      onChange={(e) => updateField('bill_display_format', e.target.value)}
+                    />
+                    Custom
+                  </label>
+                )}
               </div>
+              {form.bill_display_format === 'custom' && (
+                <p style={{ fontSize: 10, color: 'var(--amber)', marginTop: 4 }}>Using remote bill format from API endpoint</p>
+              )}
             </div>
           </div>
           <div className="form-group">
@@ -325,6 +345,7 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               company_address: form.company_address || '',
               company_phone: form.company_phone || '',
               company_email: form.company_email || '',
+              company_footer: form.company_footer || '',
               branding_logo: form.branding_logo || '',
               invoice_logo: form.invoice_logo || '',
               show_logo_on_bill: form.show_logo_on_bill || '0',

@@ -119,12 +119,6 @@ app.whenReady().then(() => {
     broadcast('csms:event', { type: 'health_status', ...result });
   });
 
-  if (startupSettings.api_bill_format_endpoint) {
-    fetch(startupSettings.api_base_url.replace(/\/$/, '') + startupSettings.api_bill_format_endpoint, {
-      headers: startupSettings.api_key ? { Authorization: `Bearer ${startupSettings.api_key}` } : {}
-    }).then(r => r.ok && r.text()).then(html => { if (html) setCachedTemplate(html); }).catch(() => {});
-  }
-
   bluetoothPrinter.registerBluetoothHandlers();
   if (startupSettings.bt_printer_address) {
     bluetoothPrinter.reconnectBluetoothPrinter(startupSettings.bt_printer_address);
@@ -344,7 +338,7 @@ ipcMain.handle('bill:previewHtml', async (_e, arg) => {
   if (!bill) return { html: null, bill_number: null };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
-  const html = renderBillHtml(bill, tx, settings, settings.bill_display_format || 'professional');
+  const html = renderBillHtml(bill, tx, settings, settings.bill_display_format || 'professional', false);
   return { html, bill_number: bill.bill_number };
 });
 
