@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { HashRouter, Routes, Route, NavLink } from 'react-router-dom';
+import { HashRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
 import { useConnectionStatus, useToast, useLiveEvents } from './hooks/useVoltDesk';
-import { getSettings, setSettings, listChargers, fetchCompanyInfo } from './services/ipc';
+import { getSettings, setSettings, listChargers, listBills, fetchCompanyInfo } from './services/ipc';
 import ChargersPage from './pages/ChargersPage';
 import ChargerDetailPage from './pages/ChargerDetailPage';
 import BillingPage from './pages/BillingPage';
@@ -15,7 +15,25 @@ import logoUrl from '../../assets/logo/logo.png';
 
 const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 
+const NAV_ITEMS = [
+  { to: '/', label: 'Dashboard', icon: 'M2 3h6v6H2V3zm10 0h6v4h-6V3zm0 6h6v8h-6V9zM2 11h6v8H2v-8z' },
+  { to: '/chargers', label: 'Chargers', icon: 'M4 2h12a1 1 0 011 1v14a1 1 0 01-1 1H4a1 1 0 01-1-1V3a1 1 0 011-1zm0 3h12M4 8h12M4 11h12M4 14h8' },
+  { to: '/billing', label: 'Billing', icon: 'M3 3h14v14H3V3zm2 4h10M5 10h10M5 13h6' },
+  { to: '/transactions', label: 'Transactions', icon: 'M12 4l-4 4h3v8h2V8h3l-4-4zM6 12l4 4H7v8H5v-8H2l4-4z' },
+  { to: '/logs', label: 'Logs', icon: 'M4 3h12a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V4a1 1 0 011-1zm1 3h10M5 9h10M5 12h6' },
+  { to: '/settings', label: 'Settings', icon: 'M10 13a3 3 0 100-6 3 3 0 000 6zm7.5-2.5h-1.2a5.5 5.5 0 00-.5-1.2l.9-.9a.8.8 0 000-1.1l-1-1a.8.8 0 00-1.1 0l-.9.9a5.5 5.5 0 00-1.2-.5V5.5a.8.8 0 00-.8-.8h-1.4a.8.8 0 00-.8.8v1.2a5.5 5.5 0 00-1.2.5l-.9-.9a.8.8 0 00-1.1 0l-1 1a.8.8 0 000 1.1l.9.9a5.5 5.5 0 00-.5 1.2H5.5a.8.8 0 00-.8.8v1.4a.8.8 0 00.8.8h1.2a5.5 5.5 0 00.5 1.2l-.9.9a.8.8 0 000 1.1l1 1a.8.8 0 001.1 0l.9-.9a5.5 5.5 0 001.2.5v1.2a.8.8 0 00.8.8h1.4a.8.8 0 00.8-.8v-1.2a5.5 5.5 0 001.2-.5l.9.9a.8.8 0 001.1 0l1-1a.8.8 0 000-1.1l-.9-.9a5.5 5.5 0 00.5-1.2h1.2a.8.8 0 00.8-.8v-1.4a.8.8 0 00-.8-.8z' },
+];
+
+function NavSvgIcon({ path }) {
+  return (
+    <svg className="nav-icon" viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+      <path d={path} />
+    </svg>
+  );
+}
+
 function Shell() {
+  const location = useLocation();
   const { connected, connecting, url, error: wsError, health } = useConnectionStatus();
   const { toasts, addToast } = useToast();
   const [chargerAlerts, setChargerAlerts] = useState({});
@@ -40,6 +58,27 @@ function Shell() {
       }
       if (evt.type === 'charger_status') {
         setChargerAlerts((prev) => ({ ...prev, [evt.charger_id]: { status: evt.status, error: evt.error, ts: Date.now() } }));
+      }
+      if (evt.type === 'charge_complete') {
+        addToast(`Charger ${evt.charger_id} connector ${evt.connector_id} finished charging`, 'success');
+      }
+      if (evt.type === 'fault_alert') {
+        addToast(`Charger ${evt.charger_id} fault${evt.error ? ': ' + evt.error : ''}`, 'error');
+      }
+      if (evt.type === 'command_result') {
+        if (evt.status === 'rejected') {
+          addToast(`${evt.command} rejected: ${evt.reason}`, 'error');
+        } else {
+          addToast(`${evt.command} command sent successfully`, 'success');
+        }
+      }
+    },
+    onBillingEvent: (evt) => {
+      if (evt.type === 'bill_generated' && evt.bill) {
+        addToast(`Bill #${evt.bill.bill_number || evt.bill.id} generated`, 'success');
+      }
+      if (evt.type === 'bill_error') {
+        addToast(`Bill generation failed: ${evt.error}`, 'error');
       }
     }
   });
@@ -79,6 +118,9 @@ function Shell() {
     const interval = setInterval(tick, 30000);
     return () => { mounted = false; clearInterval(interval); };
   }, []);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [chargerCount, setChargerCount] = useState({ online: 0, total: 0 });
+  const [pendingBills, setPendingBills] = useState(0);
   const [brandingLogo, setBrandingLogo] = useState(null);
   const [locked, setLocked] = useState(false);
   const [pinCode, setPinCode] = useState(null);
@@ -97,6 +139,35 @@ function Shell() {
   useEffect(() => {
     document.documentElement.className = theme === 'light' ? 'theme-light' : '';
   }, [theme]);
+
+  useEffect(() => {
+    let mounted = true;
+    const fetch = async () => {
+      try {
+        const chargers = await listChargers();
+        if (mounted) {
+          const online = chargers.filter((c) => c.online).length;
+          setChargerCount({ online, total: chargers.length });
+        }
+      } catch {}
+    };
+    fetch();
+    const interval = setInterval(fetch, 15000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, [refreshKey]);
+
+  useEffect(() => {
+    let mounted = true;
+    const fetch = async () => {
+      try {
+        const bills = await listBills({ limit: 9999 });
+        if (mounted) setPendingBills(bills.filter((b) => b.status === 'pending' || !b.printed_at).length);
+      } catch {}
+    };
+    fetch();
+    const interval = setInterval(fetch, 30000);
+    return () => { mounted = false; clearInterval(interval); };
+  }, [refreshKey]);
 
   const toggleTheme = async () => {
     const next = theme === 'dark' ? 'light' : 'dark';
@@ -151,7 +222,7 @@ function Shell() {
 
   const content = (
     <div className="shell" onClick={resetInactivityTimer} onMouseMove={resetInactivityTimer} onKeyDown={resetInactivityTimer}>
-      <nav className="sidebar">
+      <nav className={`sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
         <div className="brand">
           <img className="brand-logo" src={brandingLogo || logoUrl} alt="DRP logo" />
           <div className="brand-copy">
@@ -159,76 +230,59 @@ function Shell() {
             <div className="brand-subtitle">Dynamic Recharge Platform</div>
           </div>
         </div>
-        <NavLink className="nav-item" to="/">
-          <span className="nav-dot"></span>Dashboard
-        </NavLink>
-        <NavLink className="nav-item" to="/chargers">
-          <span className="nav-dot"></span>Chargers
-        </NavLink>
-        <NavLink className="nav-item" to="/billing">
-          <span className="nav-dot"></span>Billing
-        </NavLink>
-        <NavLink className="nav-item" to="/transactions">
-          <span className="nav-dot"></span>Transactions
-        </NavLink>
-        <NavLink className="nav-item" to="/logs">
-          <span className="nav-dot"></span>Logs
-        </NavLink>
-        <NavLink className="nav-item" to="/settings">
-          <span className="nav-dot"></span>Settings
-        </NavLink>
-        <div style={{ padding: '8px 20px', borderTop: '1px solid var(--border)' }}>
-          <button
-            onClick={toggleTheme}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer',
-              color: 'var(--text-muted)', fontSize: 18, padding: '4px 0',
-              display: 'flex', alignItems: 'center', gap: 8, width: '100%',
-              fontFamily: "'Inter', sans-serif", fontSize: 12,
-            }}
-            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-          >
-            {theme === 'dark' ? '☀️' : '🌙'}
-            <span style={{ color: 'var(--text-muted)' }}>
-              {theme === 'dark' ? 'Light mode' : 'Dark mode'}
-            </span>
+        <button
+          className="sidebar-collapse-btn"
+          onClick={() => setSidebarCollapsed((c) => !c)}
+          title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {sidebarCollapsed ? '\u25B6' : '\u25C0'}
+        </button>
+        {NAV_ITEMS.map((item) => (
+          <NavLink key={item.to} className="nav-item" to={item.to} end={item.to === '/'}>
+            <NavSvgIcon path={item.icon} />
+            <span className="nav-label">{item.label}</span>
+            {item.to === '/chargers' && chargerCount.total > 0 && (
+              <span className="nav-badge">{chargerCount.online}/{chargerCount.total}</span>
+            )}
+            {item.to === '/billing' && pendingBills > 0 && (
+              <span className="nav-badge">{pendingBills}</span>
+            )}
+          </NavLink>
+        ))}
+        <div className="sidebar-theme">
+          <button onClick={toggleTheme} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
+            {theme === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19'}
+            <span className="nav-label">{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
           </button>
         </div>
         <div className="conn-status">
           <span className={`conn-led ${ledClass}`}></span>
-          <span id="connLabel">{label}</span>
+          <span className="conn-label" id="connLabel">{label}</span>
         </div>
         {healthLabel && (
-          <div style={{
-            padding: '0 20px 10px', fontSize: 10, color: healthOk ? 'var(--teal)' : 'var(--red)',
-            fontFamily: "'JetBrains Mono', monospace", display: 'flex', alignItems: 'center', gap: 4,
-          }}>
-            <span style={{ width: 5, height: 5, borderRadius: '50%', background: healthOk ? 'var(--teal)' : 'var(--red)', display: 'inline-block' }}></span>
-            {healthLabel}
+          <div className={`sidebar-health ${healthOk ? 'ok' : 'fail'}`}>
+            <span className="sidebar-health-dot"></span>
+            <span className="nav-label">{healthLabel}</span>
           </div>
         )}
         {Object.entries(chargerAlerts).map(([cid, alert]) => {
           const s = (alert.status || '').toLowerCase();
           if (s === 'available') return null;
           return (
-            <div key={cid} style={{
-              padding: '0 20px 4px', fontSize: 10,
-              fontFamily: "'JetBrains Mono', monospace", display: 'flex', alignItems: 'center', gap: 4,
-              color: s === 'faulted' ? 'var(--red)' : 'var(--amber)',
-            }}>
-              <span style={{ width: 5, height: 5, borderRadius: '50%', display: 'inline-block', background: s === 'faulted' ? 'var(--red)' : 'var(--amber)' }}></span>
-              {cid}: {alert.status}{alert.error ? ` - ${alert.error}` : ''}
+            <div key={cid} className={`sidebar-alert ${s === 'faulted' ? 'fault' : 'warn'}`}>
+              <span className="sidebar-alert-dot"></span>
+              <span className="nav-label">{cid}: {alert.status}{alert.error ? ` - ${alert.error}` : ''}</span>
             </div>
           );
         })}
         {Object.entries(offlineConnectors).length > 0 && (
-          <div style={{ padding: '0 20px 8px', fontSize: 10, color: 'var(--red)', fontFamily: "'JetBrains Mono', monospace" }}>
-            {Object.keys(offlineConnectors).length} connector(s) offline
+          <div className="sidebar-offline">
+            <span className="nav-label">{Object.keys(offlineConnectors).length} connector(s) offline</span>
           </div>
         )}
       </nav>
 
-      <main className="content">
+      <main className="content" key={location.pathname}>
         <Routes>
           <Route path="/" element={<DashboardPage refreshKey={refreshKey} addToast={addToast} offlineConnectors={offlineConnectors} />} />
           <Route path="/chargers" element={<ChargersPage refreshKey={refreshKey} addToast={addToast} offlineConnectors={offlineConnectors} />} />

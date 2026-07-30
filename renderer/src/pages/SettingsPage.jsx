@@ -123,7 +123,20 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
   };
 
   if (loading || !settings) {
-    return <div className="empty-state"><p>Loading settings...</p></div>;
+    return (
+      <div style={{ padding: '28px 32px' }}>
+        <header className="view-header">
+          <div className="skeleton" style={{ width: 160, height: 28, marginBottom: 8 }} />
+          <div className="skeleton" style={{ width: 240, height: 16 }} />
+        </header>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+          {[1,2,3,4,5,6,7].map((i) => (
+            <div key={i} className="skeleton" style={{ width: 80, height: 32, borderRadius: 8 }} />
+          ))}
+        </div>
+        <div className="skeleton" style={{ width: '100%', height: 400, borderRadius: 10 }} />
+      </div>
+    );
   }
 
   const TABS = [
@@ -161,13 +174,15 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             {errors.ws_url && <div className="field-error">{errors.ws_url}</div>}
           </div>
           <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input
-              type="checkbox"
-              id="skip_ssl"
-              checked={form.skip_ssl_verify === '1'}
-              onChange={(e) => updateField('skip_ssl_verify', e.target.checked ? '1' : '0')}
-              style={{ width: 'auto', accentColor: 'var(--amber)' }}
-            />
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                id="skip_ssl"
+                checked={form.skip_ssl_verify === '1'}
+                onChange={(e) => updateField('skip_ssl_verify', e.target.checked ? '1' : '0')}
+              />
+              <span className="toggle-slider"></span>
+            </label>
             <label htmlFor="skip_ssl" style={{ margin: 0, cursor: 'pointer' }}>
               Skip SSL verification
             </label>
@@ -263,13 +278,15 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
-              <input
-                type="checkbox"
-                id="show_logo"
-                checked={form.show_logo_on_bill === '1'}
-                onChange={(e) => updateField('show_logo_on_bill', e.target.checked ? '1' : '0')}
-                style={{ width: 'auto', accentColor: 'var(--amber)' }}
-              />
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  id="show_logo"
+                  checked={form.show_logo_on_bill === '1'}
+                  onChange={(e) => updateField('show_logo_on_bill', e.target.checked ? '1' : '0')}
+                />
+                <span className="toggle-slider"></span>
+              </label>
               <label htmlFor="show_logo" style={{ margin: 0, cursor: 'pointer', fontSize: 12 }}>Show logo on invoice</label>
             </div>
             <div className="form-group" style={{ marginTop: 8 }}>

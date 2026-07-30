@@ -500,9 +500,35 @@ async function findComPortForMac(macAddress) {
   return null;
 }
 
+// ─── Periodic Health Check ────────────────────────────────────────────────────────
+let healthInterval = null;
+
+function startHealthCheck() {
+  stopHealthCheck();
+  healthInterval = setInterval(async () => {
+    for (const device of discoveredDevices) {
+      if (!device.connected) continue;
+      const alive = await btDaemonManager.ping(device.macAddress);
+      if (!alive) {
+        device.connected = false;
+        device.status = 'available';
+        const result = await reconnectBluetoothPrinter(device.macAddress);
+        if (result.success) {
+          console.log(`[bt] Reconnected ${device.macAddress}`);
+        }
+      }
+    }
+  }, 60000);
+}
+
+function stopHealthCheck() {
+  if (healthInterval) { clearInterval(healthInterval); healthInterval = null; }
+}
+
 // ─── IPC Handlers ─────────────────────────────────────────────────────────────────
 
 function registerBluetoothHandlers() {
+  startHealthCheck();
   ipcMain.handle('bluetooth:scan', async () => {
     const result = await scanBluetooth();
     return result.devices || [];
@@ -529,6 +555,7 @@ function registerBluetoothHandlers() {
 }
 
 function cleanupBluetoothDaemons() {
+  stopHealthCheck();
   btDaemonManager.disconnectAll();
 }
 

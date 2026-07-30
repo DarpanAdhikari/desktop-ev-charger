@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { listTransactions, transactionsStats, transactionsDaily, exportCsv } from '../services/ipc';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import EmptyState from '../components/EmptyState';
@@ -10,6 +10,7 @@ export default function TransactionsPage({ addToast }) {
   const [loading, setLoading] = useState(true);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [search, setSearch] = useState('');
   const [sortField, setSortField] = useState('id');
   const [sortDir, setSortDir] = useState('desc');
 
@@ -36,12 +37,28 @@ export default function TransactionsPage({ addToast }) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const sorted = [...transactions].sort((a, b) => {
-    const va = a[sortField] ?? '';
-    const vb = b[sortField] ?? '';
-    const cmp = typeof va === 'string' ? va.localeCompare(vb) : va - vb;
-    return sortDir === 'asc' ? cmp : -cmp;
-  });
+  const filtered = useMemo(() => {
+    let list = transactions;
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter((t) =>
+        (t.charger_id || '').toLowerCase().includes(q) ||
+        (t.customer_name || '').toLowerCase().includes(q) ||
+        String(t.ocpp_tx_id || '').includes(q)
+      );
+    }
+    return list;
+  }, [transactions, search]);
+
+  const sorted = useMemo(() =>
+    [...filtered].sort((a, b) => {
+      const va = a[sortField] ?? '';
+      const vb = b[sortField] ?? '';
+      const cmp = typeof va === 'string' ? va.localeCompare(vb) : va - vb;
+      return sortDir === 'asc' ? cmp : -cmp;
+    }),
+    [filtered, sortField, sortDir]
+  );
 
   const toggleSort = (field) => {
     if (sortField === field) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -49,7 +66,7 @@ export default function TransactionsPage({ addToast }) {
   };
 
   const handleExport = async () => {
-    const cols = ['id', 'charger_id', 'connector_id', 'ocpp_tx_id', 'started_at', 'stopped_at', 'duration_sec', 'energy_kwh', 'soc_start', 'soc_end', 'status'];
+    const cols = ['id', 'charger_id', 'connector_id', 'ocpp_tx_id', 'customer_name', 'started_at', 'stopped_at', 'duration_sec', 'energy_kwh', 'total_amount', 'soc_start', 'soc_end', 'status'];
     const result = await exportCsv({ data: sorted, columns: cols, filename: 'transactions.csv' });
     if (result.success) addToast(`Exported to ${result.path}`, 'success');
     else if (result.reason !== 'canceled') addToast(`Export failed: ${result.reason}`, 'error');
@@ -57,10 +74,25 @@ export default function TransactionsPage({ addToast }) {
 
   const sortIcon = (field) => {
     if (sortField !== field) return '';
-    return sortDir === 'asc' ? ' ▲' : ' ▼';
+    return sortDir === 'asc' ? ' \u25B2' : ' \u25BC';
   };
 
-  if (loading) return <div className="empty-state"><p>Loading transactions...</p></div>;
+  if (loading) {
+    return (
+      <>
+        <header className="view-header">
+          <h1>Transactions</h1>
+          <p className="muted">Charging session history and analytics.</p>
+        </header>
+        <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+          <div className="skeleton" style={{ width: 120, height: 44, borderRadius: 8 }} />
+          <div className="skeleton" style={{ width: 160, height: 44, borderRadius: 8 }} />
+        </div>
+      </>
+    );
+  }
+
+  const totalRevenue = sorted.reduce((s, t) => s + (t.total_amount || t.total_cost || 0), 0);
 
   return (
     <>
@@ -70,14 +102,23 @@ export default function TransactionsPage({ addToast }) {
       </header>
 
       {/* Filters */}
-      <div style={{ display: 'flex', gap: 12, alignItems: 'end', marginBottom: 16, flexWrap: 'wrap' }}>
-        <div className="form-group" style={{ margin: 0 }}>
-          <label>From</label>
-          <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} style={{ maxWidth: 180 }} />
+      <div className="billing-filters">
+        <div className="floating-input">
+          <input
+            type="text"
+            placeholder=" "
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <label>Search charger ID, customer, Tx #...</label>
         </div>
-        <div className="form-group" style={{ margin: 0 }}>
+        <div className="floating-input" style={{ maxWidth: 160 }}>
+          <input type="date" placeholder=" " value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+          <label>From</label>
+        </div>
+        <div className="floating-input" style={{ maxWidth: 160 }}>
+          <input type="date" placeholder=" " value={toDate} onChange={(e) => setToDate(e.target.value)} />
           <label>To</label>
-          <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} style={{ maxWidth: 180 }} />
         </div>
         <button className="btn ghost" onClick={fetchData}>Apply</button>
         <button className="btn ghost" onClick={() => { setFromDate(''); setToDate(''); }}>Clear</button>
@@ -85,25 +126,27 @@ export default function TransactionsPage({ addToast }) {
       </div>
 
       {/* Stats */}
-      <div style={{ display: 'flex', gap: 16, marginBottom: 16 }}>
+      <div className="dash-stats" style={{ marginBottom: 16 }}>
         <StatChip label="Sessions" value={stats.count} color="var(--blue)" />
         <StatChip label="Total Energy" value={`${Number(stats.total_energy || 0).toFixed(1)} kWh`} color="var(--amber)" />
+        <StatChip label="Revenue" value={`$${totalRevenue.toFixed(2)}`} color="var(--teal)" />
+        <StatChip label="Active Now" value={sorted.filter((t) => t.status === 'active').length} color="var(--amber)" />
       </div>
 
       {/* Daily chart */}
       {daily.length > 0 && (
         <div className="settings-card full" style={{ marginBottom: 16, padding: 20 }}>
-          <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, fontSize: 16, marginBottom: 12 }}>Daily Sessions</h2>
-          <ResponsiveContainer width="100%" height={200}>
+          <h2 className="dash-section-title">Daily Sessions</h2>
+          <ResponsiveContainer width="100%" height={180}>
             <BarChart data={daily}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#262B35" />
-              <XAxis dataKey="day" tick={{ fill: '#9CA3B2', fontSize: 12 }} stroke="#323846" />
-              <YAxis tick={{ fill: '#9CA3B2', fontSize: 12 }} stroke="#323846" />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="day" tick={{ fill: 'var(--text-muted)', fontSize: 11 }} stroke="var(--border)" />
+              <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 11 }} stroke="var(--border)" />
               <Tooltip
-                contentStyle={{ background: '#171B22', border: '1px solid #262B35', borderRadius: 6 }}
-                labelStyle={{ color: '#E8EDF5' }}
+                contentStyle={{ background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 6 }}
+                labelStyle={{ color: 'var(--text-primary)' }}
               />
-              <Bar dataKey="count" fill="#FFC857" radius={[4, 4, 0, 0]} name="Sessions" />
+              <Bar dataKey="count" fill="var(--amber)" radius={[4, 4, 0, 0]} name="Sessions" />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -113,27 +156,29 @@ export default function TransactionsPage({ addToast }) {
       {sorted.length === 0 ? (
         <EmptyState message="No transactions match your filters." />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <div className="log-row" style={{ fontWeight: 600, cursor: 'pointer', color: 'var(--text-secondary)' }}>
-            <span onClick={() => toggleSort('id')} style={{ cursor: 'pointer' }}>ID{sortIcon('id')}</span>
-            <span onClick={() => toggleSort('charger_id')} style={{ cursor: 'pointer' }}>Charger{sortIcon('charger_id')}</span>
+        <div className="tx-table">
+          <div className="tx-header">
+            <span onClick={() => toggleSort('id')} className="tx-sortable">ID{sortIcon('id')}</span>
+            <span onClick={() => toggleSort('charger_id')} className="tx-sortable">Charger{sortIcon('charger_id')}</span>
             <span>Conn</span>
-            <span onClick={() => toggleSort('started_at')} style={{ cursor: 'pointer' }}>Start{sortIcon('started_at')}</span>
-            <span onClick={() => toggleSort('stopped_at')} style={{ cursor: 'pointer' }}>Stop{sortIcon('stopped_at')}</span>
-            <span onClick={() => toggleSort('duration_sec')} style={{ cursor: 'pointer' }}>Duration{sortIcon('duration_sec')}</span>
-            <span onClick={() => toggleSort('energy_kwh')} style={{ cursor: 'pointer' }}>Energy{sortIcon('energy_kwh')}</span>
-            <span onClick={() => toggleSort('status')} style={{ cursor: 'pointer' }}>Status{sortIcon('status')}</span>
+            <span>Customer</span>
+            <span onClick={() => toggleSort('started_at')} className="tx-sortable">Start{sortIcon('started_at')}</span>
+            <span onClick={() => toggleSort('duration_sec')} className="tx-sortable">Duration{sortIcon('duration_sec')}</span>
+            <span onClick={() => toggleSort('energy_kwh')} className="tx-sortable">Energy{sortIcon('energy_kwh')}</span>
+            <span>Cost</span>
+            <span onClick={() => toggleSort('status')} className="tx-sortable">Status{sortIcon('status')}</span>
           </div>
           {sorted.map((tx) => (
-            <div key={tx.id} className="log-row" style={{ fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }}>
-              <span style={{ color: 'var(--text-muted)' }}>{tx.id}</span>
-              <span style={{ color: 'var(--blue)' }}>{tx.charger_id}</span>
-              <span>{tx.connector_id}</span>
-              <span style={{ color: 'var(--text-secondary)' }}>{tx.started_at ? new Date(tx.started_at).toLocaleString() : '—'}</span>
-              <span style={{ color: 'var(--text-secondary)' }}>{tx.stopped_at ? new Date(tx.stopped_at).toLocaleString() : '—'}</span>
-              <span>{tx.duration_sec ? formatDuration(tx.duration_sec) : '—'}</span>
-              <span style={{ color: 'var(--amber)' }}>{(tx.energy_kwh || 0).toFixed(2)}</span>
-              <span style={{ color: tx.status === 'active' ? 'var(--amber)' : 'var(--text-muted)' }}>{tx.status}</span>
+            <div key={tx.id} className="tx-row">
+              <span className="tx-id">{tx.id}</span>
+              <span className="tx-charger">{tx.charger_id}</span>
+              <span className="tx-conn">{tx.connector_id}</span>
+              <span className="tx-customer">{tx.customer_name || '\u2014'}</span>
+              <span className="tx-start">{tx.started_at ? new Date(tx.started_at).toLocaleString() : '\u2014'}</span>
+              <span className="tx-duration">{tx.duration_sec ? formatDuration(tx.duration_sec) : '\u2014'}</span>
+              <span className="tx-energy">{(tx.energy_kwh || 0).toFixed(2)}</span>
+              <span className="tx-cost">${(tx.total_amount || tx.total_cost || 0).toFixed(2)}</span>
+              <span className={`tx-status status-${tx.status}`}>{tx.status}</span>
             </div>
           ))}
         </div>
@@ -144,17 +189,9 @@ export default function TransactionsPage({ addToast }) {
 
 function StatChip({ label, value, color }) {
   return (
-    <div style={{
-      background: 'var(--bg-surface)',
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--radius-sm)',
-      padding: '10px 16px',
-      display: 'flex',
-      gap: 8,
-      alignItems: 'center',
-    }}>
-      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{label}</span>
-      <span style={{ fontSize: 16, fontWeight: 700, color, fontFamily: "'JetBrains Mono', monospace" }}>{value}</span>
+    <div className="dash-stat" style={{ padding: '10px 14px', gap: 8 }}>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{label}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color, fontFamily: "'JetBrains Mono', monospace" }}>{value}</div>
     </div>
   );
 }

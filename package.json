@@ -9,7 +9,9 @@
     "dev": "concurrently -k \"vite --config renderer/vite.config.js\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build:renderer": "vite build --config renderer/vite.config.js",
     "dist": "npm run build:renderer && electron-builder",
-    "postinstall": "electron-rebuild -o better-sqlite3"
+    "postinstall": "electron-rebuild -o better-sqlite3",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "author": "",
   "license": "UNLICENSED",
@@ -29,6 +31,7 @@
     "electron": "^31.3.0",
     "electron-builder": "^24.13.3",
     "vite": "^8.1.5",
+    "vitest": "^4.1.10",
     "wait-on": "^9.1.0"
   },
   "build": {

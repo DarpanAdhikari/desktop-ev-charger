@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db/db');
@@ -14,6 +14,24 @@ let mainWindow;
 let csms;
 let connectionState = { connected: false, connecting: false, url: '', error: null };
 const pendingCustomers = new Map(); // "chargerId:connectorId" -> customer object
+const prevConnectorStatus = new Map(); // "chargerId:connectorId" -> previous status
+
+function backendNotification(title, body) {
+  try {
+    if (Notification.isSupported()) {
+      const n = new Notification({ title, body });
+      n.onclick = () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.focus();
+        }
+      };
+      n.show();
+    }
+  } catch (e) {
+    console.error('[notif]', e);
+  }
+}
 
 function broadcast(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -34,6 +52,45 @@ function updateConnectionState(evt) {
 function emitCsmsEvent(evt) {
   updateConnectionState(evt);
   broadcast('csms:event', evt);
+
+  // Notification detection
+  if (evt.type === 'status_transition') {
+    const key = `${evt.charger_id}:${evt.connector_id}`;
+    const prev = prevConnectorStatus.get(key);
+    prevConnectorStatus.set(key, evt.to);
+
+    if (prev === 'Charging' && evt.to === 'Available') {
+      backendNotification(
+        'Charge Complete',
+        `Charger ${evt.charger_id} (connector ${evt.connector_id}) finished charging.`
+      );
+      broadcast('csms:event', {
+        type: 'charge_complete',
+        charger_id: evt.charger_id,
+        connector_id: evt.connector_id
+      });
+    }
+    if (evt.to === 'Faulted') {
+      backendNotification(
+        'Charger Fault',
+        `Charger ${evt.charger_id} (connector ${evt.connector_id}) reported a fault${evt.error ? ': ' + evt.error : ''}.`
+      );
+      broadcast('csms:event', {
+        type: 'fault_alert',
+        charger_id: evt.charger_id,
+        connector_id: evt.connector_id,
+        error: evt.error
+      });
+    }
+  }
+
+  if (evt.type === 'connection_status' && evt.status === 'error') {
+    backendNotification('Connection Error', evt.error || 'Failed to connect to CSMS.');
+  }
+
+  if (evt.type === 'bill_error') {
+    backendNotification('Bill Error', `Failed to generate bill for charger ${evt.charger_id}: ${evt.error}`);
+  }
 }
 
 function createWindow() {
@@ -372,6 +429,8 @@ ipcMain.handle('bill:generateImage', async (_e, arg) => {
     imgWin.close();
   }
 });
+
+ipcMain.handle('sync:status', () => syncWorker.getStatus());
 
 ipcMain.handle('health:check', async () => {
   return await checkHealth(db.getSettings());

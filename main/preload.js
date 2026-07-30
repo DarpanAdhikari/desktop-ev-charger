@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('voltdesk', {
   dbRestore: () => ipcRenderer.invoke('db:restore'),
   resetApp: (opts) => ipcRenderer.invoke('app:reset', opts),
 
+  getSyncStatus: () => ipcRenderer.invoke('sync:status'),
   checkHealth: () => ipcRenderer.invoke('health:check'),
   pickImage: () => ipcRenderer.invoke('image:pick'),
   searchCustomers: (query) => ipcRenderer.invoke('customer:search', query),

@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useRef, useEffect } from 'react';
 import { useChargers, useLiveEvents } from '../hooks/useVoltDesk';
-import { sendAction, getSettings, searchCustomers } from '../services/ipc';
+import { sendAction, getSettings, searchCustomers, listLogs } from '../services/ipc';
 
 export default function ChargerDetailPage({ addToast, offlineConnectors }) {
   const { id } = useParams();
@@ -16,6 +16,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
   const [searching, setSearching] = useState(false);
   const [customerSearchEndpoint, setCustomerSearchEndpoint] = useState('');
   const searchTimer = useRef(null);
+  const [eventLog, setEventLog] = useState([]);
 
   useLiveEvents({
     onChargerEvent: (evt) => {
@@ -37,6 +38,9 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
       if (evt.type === 'command_sent') {
         addToast(`Remote ${evt.command} sent to charger`, 'info');
       }
+      if (evt.charger_id === id) {
+        setEventLog((prev) => [{ ts: new Date().toISOString(), type: evt.type, payload: evt }, ...prev].slice(0, 20));
+      }
       refresh();
     }
   });
@@ -56,6 +60,17 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
     }, 300);
     return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
   }, [searchQuery]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const { rows } = await listLogs({ chargerId: id, limit: 20 });
+        if (mounted) setEventLog((rows || []).reverse().map((r) => ({ ts: r.ts || r.created_at, type: r.type, payload: r.payload ? (typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload) : {} })).slice(0, 20));
+      } catch {}
+    })();
+    return () => { mounted = false; };
+  }, [id]);
 
   const charger = chargers.find((c) => c.id === id);
 
@@ -86,7 +101,24 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
   };
 
   if (loading) {
-    return <div className="empty-state"><p>Loading...</p></div>;
+    return (
+      <>
+        <button className="back-btn" onClick={() => navigate('/chargers')}>Back to Chargers</button>
+        <div className="view-header">
+          <div className="skeleton" style={{ width: 200, height: 28, marginBottom: 8 }} />
+          <div className="skeleton" style={{ width: 140, height: 16 }} />
+        </div>
+        <div className="connector-grid">
+          {[1,2].map((i) => (
+            <div key={i} className="connector-card" style={{ padding: 16 }}>
+              <div className="skeleton" style={{ width: '60%', height: 16, marginBottom: 8 }} />
+              <div className="skeleton" style={{ width: '40%', height: 14, marginBottom: 16 }} />
+              <div className="skeleton" style={{ width: '100%', height: 80, borderRadius: 8 }} />
+            </div>
+          ))}
+        </div>
+      </>
+    );
   }
 
   if (!charger) {
@@ -98,18 +130,26 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
     );
   }
 
+  const lastSeen = charger.last_seen
+    ? formatTimeAgo(new Date(charger.last_seen).getTime())
+    : 'never';
+
   return (
     <>
       <header className="view-header">
         <button className="back-btn" onClick={() => navigate('/chargers')}>Back to Chargers</button>
-        <h1>{charger.id}</h1>
-        <p className="muted">
-          {charger.vendor || 'Unknown'} {charger.model ? `- ${charger.model}` : ''}
-          {' '}<span className={`pill ${charger.online ? 'online' : 'offline'}`}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <h1 style={{ margin: 0 }}>{charger.id}</h1>
+          <span className={`pill ${charger.online ? 'online' : 'offline'}`}>
             {charger.online ? 'Online' : 'Offline'}
           </span>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "'JetBrains Mono', monospace" }}>
+            last seen: {lastSeen}
+          </span>
+        </div>
+        <p className="muted">
+          {charger.vendor || 'Unknown'} {charger.model ? `- ${charger.model}` : ''}
         </p>
-
       </header>
 
       {customerSearchEndpoint && (
@@ -119,8 +159,8 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
           </label>
           {customer ? (
             <div className="customer-tag">
-              <span><strong>{customer.customer_name}</strong> ({customer.customer_id}){customer.customer_pan ? ` · PAN: ${customer.customer_pan}` : ''}</span>
-              <button className="btn-del" onClick={() => { setCustomer(null); setSearchQuery(''); setSearchResults([]); }}>×</button>
+              <span><strong>{customer.customer_name}</strong> ({customer.customer_id}){customer.customer_pan ? ` \u00B7 PAN: ${customer.customer_pan}` : ''}</span>
+              <button className="btn-del" onClick={() => { setCustomer(null); setSearchQuery(''); setSearchResults([]); }}>\u00D7</button>
             </div>
           ) : (
             <>
@@ -135,7 +175,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
                   {searchResults.map((c, i) => (
                     <div key={c.customer_id || i} className="customer-result" onClick={() => { setCustomer(c); setSearchQuery(''); setSearchResults([]); }}>
                       <strong>{c.customer_name}</strong> ({c.customer_id})
-                      {c.customer_pan && <span className="muted"> · PAN: {c.customer_pan}</span>}
+                      {c.customer_pan && <span className="muted"> \u00B7 PAN: {c.customer_pan}</span>}
                     </div>
                   ))}
                 </div>
@@ -225,11 +265,11 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
                     <div className="connector-section-group">
                       <div className="section-group-label">Progress</div>
                       <div className="section-group-metrics">
-                        {delta.soc != null && <Metric icon={<IconTrendUp />} label="SoC Δ" value={formatNullable(delta.soc, '%')} />}
-                        {delta.energy != null && <Metric icon={<IconTrendUp />} label="Energy Δ" value={formatNullable(delta.energy, 'kWh')} />}
+                        {delta.soc != null && <Metric icon={<IconTrendUp />} label="SoC \u0394" value={formatNullable(delta.soc, '%')} />}
+                        {delta.energy != null && <Metric icon={<IconTrendUp />} label="Energy \u0394" value={formatNullable(delta.energy, 'kWh')} />}
                         {session.soc_start != null && session.soc_end != null && (
                           <span className="connector-metric" style={{ color: 'var(--text-secondary)', fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
-                            Session: {session.soc_start}% → {session.soc_end}%
+                            Session: {session.soc_start}% \u2192 {session.soc_end}%
                           </span>
                         )}
                       </div>
@@ -290,7 +330,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
                 return (
                   <div className="cmd-result">
                     <span className={r.ok ? 'cmd-ok' : 'cmd-fail'}>
-                      {r.ok ? '✓' : '✗'} {r.command} {r.status}{r.reason ? `: ${r.reason}` : ''}
+                      {r.ok ? '\u2713' : '\u2717'} {r.command} {r.status}{r.reason ? `: ${r.reason}` : ''}
                     </span>
                     <span className="cmd-ts">{ago}s ago</span>
                   </div>
@@ -300,8 +340,64 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
           );
         })}
       </div>
+
+      {eventLog.length > 0 && (
+        <div className="dash-section" style={{ marginTop: 20 }}>
+          <h2>Recent Events</h2>
+          <div className="event-timeline">
+            {eventLog.slice(0, 15).map((e, i) => (
+              <div key={i} className="event-row">
+                <span className="event-ts">
+                  {e.ts ? new Date(e.ts).toLocaleTimeString() : ''}
+                </span>
+                <span className={`event-type event-${eventTypeClass(e.type)}`}>
+                  {e.type}
+                </span>
+                <span className="event-detail">
+                  {eventDetail(e)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </>
   );
+}
+
+function eventTypeClass(type) {
+  if (type === 'charge_complete' || type === 'bill_generated') return 'success';
+  if (type === 'fault_alert' || type === 'bill_error' || type === 'command_rejected') return 'error';
+  if (type === 'meter' || type === 'meter_eta') return 'info';
+  return 'default';
+}
+
+function eventDetail(e) {
+  const p = e.payload || {};
+  if (e.type === 'status_transition') {
+    const from = p.from || '';
+    const to = p.to || '';
+    return `Connector ${p.connector_id}: ${from} \u2192 ${to}${p.error ? ` (${p.error})` : ''}`;
+  }
+  if (e.type === 'charge_complete') {
+    return `Connector ${p.connector_id} finished charging`;
+  }
+  if (e.type === 'fault_alert') {
+    return `Connector ${p.connector_id} fault${p.error ? ': ' + p.error : ''}`;
+  }
+  if (e.type === 'bill_generated') {
+    return `Bill #${p.bill?.bill_number || ''} generated ($${(p.bill?.total || 0).toFixed(2)})`;
+  }
+  if (e.type === 'transaction_started') {
+    return `Tx ${p.transaction_id} started on connector ${p.connector_id}`;
+  }
+  if (e.type === 'transaction_stopped') {
+    return `Tx ${p.transaction_id} stopped on connector ${p.connector_id}`;
+  }
+  if (e.type === 'command_result') {
+    return `${p.command} on conn ${p.connector_id}: ${p.status}${p.reason ? ' - ' + p.reason : ''}`;
+  }
+  return p.charger_id || p.connector_id != null ? `Connector ${p.connector_id}` : '';
 }
 
 function Metric({ icon, label, value, valueClass }) {
@@ -404,4 +500,16 @@ function formatCurrency(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
   return `$${num.toFixed(2)}`;
+}
+
+function formatTimeAgo(ts) {
+  const diff = Date.now() - ts;
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
 }

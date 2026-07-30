@@ -106,6 +106,10 @@ export function resetApp(opts) {
   return api.resetApp(opts);
 }
 
+export function getSyncStatus() {
+  return api.getSyncStatus();
+}
+
 export function checkHealth() {
   return api.checkHealth();
 }
