@@ -320,6 +320,7 @@ function forceCloseSession(txId) {
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(txId);
   if (!tx) return { success: false, reason: 'transaction_not_found' };
   if (tx.status !== 'active') return { success: false, reason: 'not_active' };
+  if (!tx.customer_id && !tx.customer_name) return { success: false, reason: 'no_customer' };
 
   const result = finalizeTransaction(tx, 'force_closed', { flagged: false, emitType: 'session_closed' });
   if (!result) return { success: false, reason: 'already_closed' };

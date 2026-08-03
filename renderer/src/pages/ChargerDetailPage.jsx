@@ -188,7 +188,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
                 )}
               </div>
               <div className="attention-actions">
-                {tx.status === 'active' && (
+                {tx.status === 'active' && (tx.customer_id || tx.customer_name) && (
                   <button className="btn danger" onClick={() => setConfirmClose(tx)}>
                     {FORCE_CLOSE_LABEL}
                   </button>
@@ -351,7 +351,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
 
               {showMeterData && (
                 <div className="connector-sections">
-                  {activeTx?.flagged && (
+{activeTx?.flagged && (activeTx.customer_id || activeTx.customer_name) && (
                     <div className="attention-banner">
                       <span className="attention-banner-title">{ATTENTION_BANNER_TITLE}</span>
                       <span>{attentionMessage(activeTx.flag_reason)}</span>

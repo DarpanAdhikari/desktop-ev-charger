@@ -62,6 +62,7 @@ const REASON_TEXT = {
   not_active: 'the session is not active',
   not_stopped: 'the session has not been stopped',
   already_closed: 'the session is already closed',
+  no_customer: 'no customer attached to this session',
   transaction_not_found: 'transaction not found',
   pin_not_configured: 'no password is set',
   invalid_pin: 'incorrect password',

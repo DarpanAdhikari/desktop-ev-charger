@@ -41,13 +41,17 @@ function seedConnector(chargerId, connectorId, status = 'Available') {
     .run(chargerId, connectorId, status, new Date().toISOString());
 }
 
-function seedActiveTx(chargerId, connectorId, ocppTxId = 100, energy = 5.5) {
+function seedActiveTx(chargerId, connectorId, ocppTxId = 100, energy = 5.5, customer = null) {
+  const c = customer || {};
   const info = raw
     .prepare(
-      `INSERT INTO transactions (charger_id, connector_id, ocpp_tx_id, started_at, status, energy_kwh, soc_start, soc_end)
-       VALUES (?, ?, ?, ?, 'active', ?, 40, 80)`
+      `INSERT INTO transactions
+         (charger_id, connector_id, ocpp_tx_id, started_at, status, energy_kwh, soc_start, soc_end,
+          customer_id, customer_name)
+       VALUES (?, ?, ?, ?, 'active', ?, 40, 80, ?, ?)`
     )
-    .run(chargerId, connectorId, ocppTxId, new Date().toISOString(), energy);
+    .run(chargerId, connectorId, ocppTxId, new Date().toISOString(), energy,
+      c.customer_id || null, c.customer_name || null);
   return raw.prepare('SELECT * FROM transactions WHERE id = ?').get(info.lastInsertRowid);
 }
 
@@ -278,7 +282,7 @@ describe('Recovery', () => {
     it('closes an active session using recent data and bills it', () => {
       seedCharger();
       seedConnector('CHG-1', 1, 'Faulted');
-      const tx = seedActiveTx('CHG-1', 1, 100, 7.25);
+      const tx = seedActiveTx('CHG-1', 1, 100, 7.25, { customer_id: 'CUST-1', customer_name: 'Binita' });
 
       const result = recovery.forceCloseSession(tx.id);
 
@@ -286,14 +290,28 @@ describe('Recovery', () => {
       const updated = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(tx.id);
       expect(updated.status).toBe('stopped');
       expect(updated.billed).toBe(1);
+      expect(updated.customer_id).toBe('CUST-1');
       expect(result.bill.bill_number).toBe('TEST-' + tx.id);
       expect(events.some((e) => e.type === 'session_closed')).toBe(true);
+    });
+
+    it('rejects a session that has no customer attached', () => {
+      seedCharger();
+      seedConnector('CHG-1', 1, 'Faulted');
+      const tx = seedActiveTx('CHG-1', 1);
+
+      const result = recovery.forceCloseSession(tx.id);
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toBe('no_customer');
+      const updated = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(tx.id);
+      expect(updated.status).toBe('active');
     });
 
     it('rejects a transaction that is already closed', () => {
       seedCharger();
       seedConnector('CHG-1', 1, 'Faulted');
-      const tx = seedActiveTx('CHG-1', 1);
+      const tx = seedActiveTx('CHG-1', 1, 100, 5.5, { customer_id: 'CUST-1', customer_name: 'Binita' });
       recovery.forceCloseSession(tx.id);
       const result = recovery.forceCloseSession(tx.id);
       expect(result.success).toBe(false);
@@ -321,7 +339,7 @@ describe('Recovery', () => {
     it('rejects already-billed transactions', () => {
       seedCharger();
       seedConnector('CHG-1', 1, 'Available');
-      const tx = seedActiveTx('CHG-1', 1);
+      const tx = seedActiveTx('CHG-1', 1, 100, 5.5, { customer_id: 'CUST-1', customer_name: 'Binita' });
       recovery.forceCloseSession(tx.id);
       const result = recovery.retryBilling(tx.id);
       expect(result.success).toBe(false);
