@@ -1,12 +1,24 @@
 import { useState, useMemo } from 'react';
 import { useBills, useLiveEvents } from '../hooks/useVoltDesk';
-import { printBill, getSettings, exportCsv } from '../services/ipc';
+import { printBill, getSettings, exportCsv, generateBillPdf, generateBillImage } from '../services/ipc';
+import { useContextMenu } from '../hooks/useContextMenu.jsx';
+import { base64ToBlob, withTimeout } from '../utils';
+import { IMAGE_GEN_TIMEOUT_MS } from '../constants';
 import EmptyState from '../components/EmptyState';
 import BillModal from '../components/BillModal';
+import ShareModal from '../components/ShareModal';
+import {
+  billGeneratedWithTotalText, BILL_ERROR, PRINTED_SUCCESS, PRINT_FAILED, PRINT_ERROR,
+  EXPORTED_TO, EXPORT_FAILED, EXPORT_CSV, EXPORT_CSV_FILTERS, EMPTY_BILLS,
+  PDF_SAVED, PDF_FAILED, IMAGE_TIMED_OUT, IMAGE_FAILED, IMAGE_COPIED, IMAGE_COPY_FAILED,
+  PRINT_LABEL, DOWNLOAD_PDF, COPY_IMAGE, SHARE_LABEL, OPEN_DETAILS,
+} from '../strings';
 
 export default function BillingPage({ refreshKey, addToast }) {
   const { bills, loading, refresh } = useBills();
+  const { openMenu } = useContextMenu();
   const [selectedBill, setSelectedBill] = useState(null);
+  const [shareBill, setShareBill] = useState(null);
   const [search, setSearch] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -15,9 +27,9 @@ export default function BillingPage({ refreshKey, addToast }) {
     onBillingEvent: (evt) => {
       refresh();
       if (evt.type === 'bill_generated') {
-        addToast(`Bill ${evt.bill_number} generated \u2014 $${(evt.total || 0).toFixed(2)}`, 'success');
+        addToast(billGeneratedWithTotalText(evt.bill || evt), 'success');
       } else if (evt.type === 'bill_error') {
-        addToast(`Bill error: ${evt.reason || 'unknown'}`, 'error');
+        addToast(BILL_ERROR(evt.error || evt.reason), 'error');
       }
     },
   });
@@ -48,17 +60,68 @@ export default function BillingPage({ refreshKey, addToast }) {
       const settings = await getSettings();
       const result = await printBill({ billId, deviceName: settings.print_device_name || undefined });
       if (result.success) {
-        addToast(`Bill #${result.bill.bill_number} printed successfully`, 'success');
+        addToast(PRINTED_SUCCESS(result.bill.bill_number || result.bill.id), 'success');
       } else {
-        addToast(`Print failed: ${result.failureReason || 'unknown'}`, 'error');
+        addToast(PRINT_FAILED(result.reason || result.failureReason), 'error');
       }
       refresh();
       if (selectedBill && selectedBill.id === billId) {
         setSelectedBill(result.bill);
       }
     } catch (e) {
-      addToast(`Print error: ${e.message}`, 'error');
+      addToast(PRINT_ERROR(e.message), 'error');
     }
+  };
+
+  const handleExportCsv = async () => {
+    const cols = ['id', 'bill_number', 'company_name', 'customer_name', 'energy_kwh', 'rate_per_kwh', 'subtotal', 'tax_percent', 'tax_amount', 'total', 'print_success_count', 'print_fail_count', 'created_at'];
+    const result = await exportCsv({ data: filtered, columns: cols, filename: 'bills.csv' });
+    if (result.success) addToast(EXPORTED_TO(result.path), 'success');
+    else if (result.reason !== 'canceled') addToast(EXPORT_FAILED(result.reason), 'error');
+  };
+
+  const downloadBillPdf = async (bill) => {
+    const result = await generateBillPdf(bill.id);
+    if (!result.success) { addToast(PDF_FAILED(result.reason), 'error'); return; }
+    const blob = base64ToBlob(result.data, 'application/pdf');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = result.name;
+    a.click();
+    URL.revokeObjectURL(url);
+    addToast(PDF_SAVED(result.name), 'success');
+  };
+
+  const copyBillImage = async (bill) => {
+    let result;
+    try {
+      result = await withTimeout(generateBillImage(bill.id), IMAGE_GEN_TIMEOUT_MS);
+    } catch {
+      addToast(IMAGE_TIMED_OUT, 'error');
+      return;
+    }
+    if (!result.success) { addToast(IMAGE_FAILED(result.reason), 'error'); return; }
+    try {
+      const blob = base64ToBlob(result.data, 'image/png');
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      addToast(IMAGE_COPIED, 'success');
+    } catch {
+      addToast(IMAGE_COPY_FAILED, 'error');
+    }
+  };
+
+  const shareBillImage = (bill) => setShareBill(bill);
+
+  const handleBillContextMenu = (e, bill) => {
+    openMenu(e, [
+      { label: OPEN_DETAILS, run: () => setSelectedBill(bill) },
+      { label: PRINT_LABEL, run: () => handlePrint(bill.id) },
+      { label: DOWNLOAD_PDF, run: () => downloadBillPdf(bill) },
+      { label: COPY_IMAGE, run: () => copyBillImage(bill) },
+      { label: SHARE_LABEL, run: () => shareBillImage(bill) },
+      { separator: true },
+      { label: EXPORT_CSV_FILTERS, run: handleExportCsv },
+    ]);
   };
 
   if (loading) {
@@ -119,16 +182,11 @@ export default function BillingPage({ refreshKey, addToast }) {
           />
           <label>To</label>
         </div>
-        <button className="btn ghost" onClick={async () => {
-          const cols = ['id', 'bill_number', 'company_name', 'customer_name', 'energy_kwh', 'rate_per_kwh', 'subtotal', 'tax_percent', 'tax_amount', 'total', 'print_success_count', 'print_fail_count', 'created_at'];
-          const result = await exportCsv({ data: filtered, columns: cols, filename: 'bills.csv' });
-          if (result.success) addToast(`Exported to ${result.path}`, 'success');
-          else if (result.reason !== 'canceled') addToast(`Export failed: ${result.reason}`, 'error');
-        }}>Export CSV</button>
+        <button className="btn ghost" onClick={handleExportCsv}>{EXPORT_CSV}</button>
       </div>
 
       {filtered.length === 0 ? (
-        <EmptyState message="No bills found. Try adjusting your filters." />
+        <EmptyState message={EMPTY_BILLS} />
       ) : (
         <div className="bill-list">
           <div className="bill-row bill-header">
@@ -140,7 +198,7 @@ export default function BillingPage({ refreshKey, addToast }) {
             <span>Prints</span>
           </div>
           {filtered.map((bill) => (
-            <div key={bill.id} className="bill-row" onClick={() => setSelectedBill(bill)}>
+            <div key={bill.id} className="bill-row" onClick={() => setSelectedBill(bill)} onContextMenu={(e) => handleBillContextMenu(e, bill)}>
               <span className="bill-num">{bill.bill_number}</span>
               <span className="bill-total">${(bill.total || 0).toFixed(2)}</span>
               <span className="bill-company">{bill.customer_name || bill.company_name || '\u2014'}</span>
@@ -170,6 +228,14 @@ export default function BillingPage({ refreshKey, addToast }) {
           bill={selectedBill}
           onClose={() => setSelectedBill(null)}
           onPrint={handlePrint}
+          addToast={addToast}
+        />
+      )}
+
+      {shareBill && (
+        <ShareModal
+          bill={shareBill}
+          onClose={() => setShareBill(null)}
           addToast={addToast}
         />
       )}

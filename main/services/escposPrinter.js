@@ -1,8 +1,7 @@
 const { BrowserWindow } = require('electron');
 const net = require('net');
-const fs = require('fs');
-const { execSync } = require('child_process');
 const db = require('../db/db');
+const { SOCKET_TIMEOUT_MS } = require('../constants');
 
 // ESC/POS commands
 const ESC = 0x1B;
@@ -143,6 +142,10 @@ function buildBillEscPos(bill, tx, settings) {
   p(escPosText('Energy & Rate'));
   p(escPosBoldOff());
   p(escPosText(padRight('Energy', 20) + padLeft((bill.energy_kwh || 0).toFixed(3) + ' kWh', 22)));
+  const meStart = bill.meter_energy_start_kwh != null ? bill.meter_energy_start_kwh : tx.meter_energy_start_kwh;
+  const meEnd = bill.meter_energy_end_kwh != null ? bill.meter_energy_end_kwh : tx.meter_energy_end_kwh;
+  if (meStart != null) p(escPosText(padRight('Meter Start', 20) + padLeft(Number(meStart).toFixed(2) + ' kWh', 22)));
+  if (meEnd != null) p(escPosText(padRight('Meter End', 20) + padLeft(Number(meEnd).toFixed(2) + ' kWh', 22)));
   p(escPosText(padRight('Rate per kWh', 20) + padLeft((bill.rate_per_kwh || 0).toFixed(2), 22)));
   if (bill.rate_name) p(escPosText(padRight('Rate Plan', 20) + padLeft(bill.rate_name, 22)));
 
@@ -298,7 +301,7 @@ async function printImageToNetwork(html, ip, port = 9100, targetDots) {
   ]);
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
-    socket.setTimeout(10000);
+    socket.setTimeout(SOCKET_TIMEOUT_MS);
     socket.connect(port, ip, () => {
       socket.write(payload, (err) => {
         if (err) { socket.destroy(); reject(err); return; }
@@ -327,18 +330,6 @@ async function printImageToBluetooth(html, macAddress, targetDots) {
   return result;
 }
 
-function listComPorts() {
-  try {
-    const result = execSync(
-      'powershell -NoProfile -Command "[System.IO.Ports.SerialPort]::GetPortNames()"',
-      { encoding: 'utf8', timeout: 5000 }
-    );
-    return result.trim().split(/\r?\n/).filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
 function buildTestPayload() {
   const line = '='.repeat(42);
   return Buffer.concat([
@@ -365,7 +356,7 @@ function buildTestPayload() {
 function sendBufferToNetwork(buffer, ip, port) {
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
-    socket.setTimeout(10000);
+    socket.setTimeout(SOCKET_TIMEOUT_MS);
     socket.connect(port, ip, () => {
       socket.write(buffer, (err) => {
         if (err) { socket.destroy(); reject(err); return; }
@@ -386,7 +377,6 @@ module.exports = {
   buildBillEscPos,
   renderHtmlToBitmap,
   rasterToEscPos,
-  listComPorts,
   escPosInit,
   escPosAlignCenter,
   escPosSizeDouble,

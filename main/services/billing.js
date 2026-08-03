@@ -1,4 +1,6 @@
 const db = require('../db/db');
+const billNumberService = require('./billNumber');
+const { MIN_BILLABLE_MS } = require('../constants');
 
 function toMinutes(hhmm) {
   const [h, m] = hhmm.split(':').map(Number);
@@ -36,6 +38,9 @@ function generateBillForTransaction(transactionId) {
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(transactionId);
   if (!tx) throw new Error(`transaction ${transactionId} not found`);
 
+  const existing = raw.prepare('SELECT * FROM bills WHERE transaction_id = ?').get(transactionId);
+  if (existing) return existing;
+
   const startedAt = tx.started_at ? new Date(tx.started_at) : new Date();
   const stoppedAt = tx.stopped_at ? new Date(tx.stopped_at) : new Date();
   const energy = tx.energy_kwh || 0;
@@ -53,7 +58,7 @@ function generateBillForTransaction(transactionId) {
 
   // For very short sessions (< 1 minute) just use the shift at start time
   const durationMs = stoppedAt.getTime() - startedAt.getTime();
-  if (durationMs < 60000) {
+  if (durationMs < MIN_BILLABLE_MS) {
     const shift = findShiftForTime(startedAt) || activeShifts[0];
     const rate = shift ? shift.rate_per_kwh : 0;
     const subtotal = Math.round(rate * energy * 100) / 100;
@@ -114,7 +119,9 @@ function generateBillForTransaction(transactionId) {
 }
 
 function createBill(tx, settings, energy, rate, subtotal, taxPercent, taxAmount, total, shiftId, serviceFee, serviceCharge) {
-  const billNumber = db.nextBillNumber();
+  // Prefer the server-assigned number when one is cached; otherwise fall back
+  // to the local sequence (billing must never block on the network).
+  const billNumber = billNumberService.consume() || db.nextBillNumber();
   const createdAt = new Date().toISOString();
   const raw = db.raw;
   const rateName = shiftId ? getShiftName(shiftId) : null;
@@ -125,11 +132,15 @@ function createBill(tx, settings, energy, rate, subtotal, taxPercent, taxAmount,
         (transaction_id, bill_number, company_name, shift_id, rate_per_kwh,
          energy_kwh, subtotal, tax_percent, tax_amount, service_fee, service_charge,
          soc_start, soc_end, rate_name, total, created_at,
-         customer_id, customer_name, customer_pan, customer_address, customer_vehicle)
+         customer_id, customer_name, customer_pan, customer_address, customer_vehicle,
+         max_power_kw, avg_power_kw, last_power_kw,
+         meter_energy_start_kwh, meter_energy_end_kwh)
        VALUES (@transaction_id, @bill_number, @company_name, @shift_id, @rate_per_kwh,
                @energy_kwh, @subtotal, @tax_percent, @tax_amount, @service_fee, @service_charge,
                @soc_start, @soc_end, @rate_name, @total, @created_at,
-               @customer_id, @customer_name, @customer_pan, @customer_address, @customer_vehicle)`
+               @customer_id, @customer_name, @customer_pan, @customer_address, @customer_vehicle,
+               @max_power_kw, @avg_power_kw, @last_power_kw,
+               @meter_energy_start_kwh, @meter_energy_end_kwh)`
     )
     .run({
       transaction_id: tx.id,
@@ -152,7 +163,12 @@ function createBill(tx, settings, energy, rate, subtotal, taxPercent, taxAmount,
       customer_name: tx.customer_name || null,
       customer_pan: tx.customer_pan || null,
       customer_address: tx.customer_address || null,
-      customer_vehicle: tx.customer_vehicle || null
+      customer_vehicle: tx.customer_vehicle || null,
+      max_power_kw: tx.max_power_kw != null ? tx.max_power_kw : null,
+      avg_power_kw: tx.avg_power_kw != null ? tx.avg_power_kw : null,
+      last_power_kw: tx.last_power_kw != null ? tx.last_power_kw : null,
+      meter_energy_start_kwh: tx.meter_energy_start_kwh != null ? tx.meter_energy_start_kwh : null,
+      meter_energy_end_kwh: tx.meter_energy_end_kwh != null ? tx.meter_energy_end_kwh : null,
     });
 
   const bill = raw.prepare('SELECT * FROM bills WHERE id = ?').get(result.lastInsertRowid);

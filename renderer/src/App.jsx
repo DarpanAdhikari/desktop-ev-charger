@@ -1,7 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { HashRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
+import { HashRouter, Routes, Route, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useConnectionStatus, useToast, useLiveEvents } from './hooks/useVoltDesk';
-import { getSettings, setSettings, listChargers, listBills, fetchCompanyInfo } from './services/ipc';
+import { getSettings, setSettings, listChargers, listBills, fetchCompanyInfo, verifyPassword, clipboardCopy, clipboardPaste, clipboardCut, clipboardSelectAll } from './services/ipc';
+import { attentionToastText, sessionRecoveredText, sessionClosedText, commandRejectedText, commandQueuedText, commandQueuedDeliveredText, chargeCompleteText, chargerFaultText, billGeneratedText, BILL_GENERATION_FAILED, offlineConnectorsText } from './strings';
+import useKeyboardShortcuts from './hooks/useKeyboardShortcuts';
+import { ContextMenuProvider, useContextMenu } from './hooks/useContextMenu.jsx';
+import ContextMenu from './components/ContextMenu';
+import CommandPalette from './components/CommandPalette';
 import ChargersPage from './pages/ChargersPage';
 import ChargerDetailPage from './pages/ChargerDetailPage';
 import BillingPage from './pages/BillingPage';
@@ -12,8 +17,7 @@ import DashboardPage from './pages/DashboardPage';
 import ToastContainer from './components/ToastContainer';
 import PinLock from './components/PinLock';
 import logoUrl from '../../assets/logo/logo.png';
-
-const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+import { OFFLINE_DETECT_MS, OFFLINE_POLL_MS, DATA_REFRESH_MS, SETTINGS_REFRESH_MS, INACTIVITY_TIMEOUT_MS } from './constants';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: 'M2 3h6v6H2V3zm10 0h6v4h-6V3zm0 6h6v8h-6V9zM2 11h6v8H2v-8z' },
@@ -60,25 +64,38 @@ function Shell() {
         setChargerAlerts((prev) => ({ ...prev, [evt.charger_id]: { status: evt.status, error: evt.error, ts: Date.now() } }));
       }
       if (evt.type === 'charge_complete') {
-        addToast(`Charger ${evt.charger_id} connector ${evt.connector_id} finished charging`, 'success');
+        addToast(chargeCompleteText(evt.charger_id, evt.connector_id), 'success');
       }
       if (evt.type === 'fault_alert') {
-        addToast(`Charger ${evt.charger_id} fault${evt.error ? ': ' + evt.error : ''}`, 'error');
+        addToast(chargerFaultText(evt.charger_id, evt.error), 'error');
       }
       if (evt.type === 'command_result') {
         if (evt.status === 'rejected') {
-          addToast(`${evt.command} rejected: ${evt.reason}`, 'error');
-        } else {
-          addToast(`${evt.command} command sent successfully`, 'success');
+          addToast(commandRejectedText(evt.command, evt.reason), 'error');
         }
+      }
+      if (evt.type === 'command_queued') {
+        addToast(commandQueuedText(evt.command), 'info');
+      }
+      if (evt.type === 'command_queued_delivered') {
+        addToast(commandQueuedDeliveredText(evt.command), 'info');
+      }
+      if (evt.type === 'session_attention') {
+        addToast(attentionToastText(evt.charger_id, evt.connector_id, evt.reason), 'warning');
+      }
+      if (evt.type === 'session_recovered') {
+        addToast(sessionRecoveredText(evt.charger_id, evt.reason, evt.bill), 'info');
+      }
+      if (evt.type === 'session_closed') {
+        addToast(sessionClosedText(evt.charger_id, evt.connector_id, evt.bill), 'success');
       }
     },
     onBillingEvent: (evt) => {
       if (evt.type === 'bill_generated' && evt.bill) {
-        addToast(`Bill #${evt.bill.bill_number || evt.bill.id} generated`, 'success');
+        addToast(billGeneratedText(evt.bill), 'success');
       }
       if (evt.type === 'bill_error') {
-        addToast(`Bill generation failed: ${evt.error}`, 'error');
+        addToast(BILL_GENERATION_FAILED(evt.error), 'error');
       }
     }
   });
@@ -89,7 +106,7 @@ function Shell() {
       const now = Date.now();
       const stale = {};
       for (const [key, ts] of Object.entries(lastSeen.current)) {
-        if (now - ts > 60000) stale[key] = ts;
+        if (now - ts > OFFLINE_DETECT_MS) stale[key] = ts;
       }
       try {
         const chargersData = await listChargers();
@@ -99,8 +116,8 @@ function Shell() {
           for (const con of (ch.connectors || [])) {
             const key = `${ch.id}:${con.connector_id}`;
             const ts = lastSeen.current[key];
-            if (!ts && (!chargerSeen || now - chargerSeen > 60000)) {
-              stale[key] = chargerSeen || (now - 60001);
+            if (!ts && (!chargerSeen || now - chargerSeen > OFFLINE_DETECT_MS)) {
+              stale[key] = chargerSeen || (now - OFFLINE_DETECT_MS - 1);
             }
           }
         }
@@ -115,7 +132,7 @@ function Shell() {
       });
     };
     tick();
-    const interval = setInterval(tick, 30000);
+    const interval = setInterval(tick, OFFLINE_POLL_MS);
     return () => { mounted = false; clearInterval(interval); };
   }, []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -123,21 +140,35 @@ function Shell() {
   const [pendingBills, setPendingBills] = useState(0);
   const [brandingLogo, setBrandingLogo] = useState(null);
   const [locked, setLocked] = useState(false);
-  const [pinCode, setPinCode] = useState(null);
-  const [theme, setTheme] = useState('dark');
+  const [password, setPassword] = useState(null);
+  const [autoLock, setAutoLock] = useState(true);
+  const [lockOnStartup, setLockOnStartup] = useState(true);
+  const [theme, setTheme] = useState('light');
   const inactivityRef = useRef(null);
 
   useEffect(() => {
     getSettings().then((s) => {
-      setPinCode(s.pin_code || '');
-      setTheme(s.theme || 'dark');
+      setPassword(s.security_password || '');
+      setAutoLock(s.auto_lock !== '0');
+      setLockOnStartup(s.lock_on_startup !== '0');
+      const savedTheme = s.theme;
+      setTheme(savedTheme === 'dark' || savedTheme === 'light' || savedTheme === 'device' ? savedTheme : 'light');
       if (s.branding_logo) setBrandingLogo(s.branding_logo);
-      if (s.pin_code) setLocked(true);
+      if (s.security_password && s.lock_on_startup !== '0') setLocked(true);
     });
   }, []);
 
   useEffect(() => {
-    document.documentElement.className = theme === 'light' ? 'theme-light' : '';
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const apply = () => {
+      const isDark = theme === 'dark' || (theme === 'device' && media.matches);
+      document.documentElement.className = isDark ? '' : 'theme-light';
+    };
+    apply();
+    if (theme === 'device') {
+      media.addEventListener('change', apply);
+      return () => media.removeEventListener('change', apply);
+    }
   }, [theme]);
 
   useEffect(() => {
@@ -152,7 +183,7 @@ function Shell() {
       } catch {}
     };
     fetch();
-    const interval = setInterval(fetch, 15000);
+    const interval = setInterval(fetch, SETTINGS_REFRESH_MS);
     return () => { mounted = false; clearInterval(interval); };
   }, [refreshKey]);
 
@@ -165,24 +196,23 @@ function Shell() {
       } catch {}
     };
     fetch();
-    const interval = setInterval(fetch, 30000);
+    const interval = setInterval(fetch, DATA_REFRESH_MS);
     return () => { mounted = false; clearInterval(interval); };
   }, [refreshKey]);
 
-  const toggleTheme = async () => {
-    const next = theme === 'dark' ? 'light' : 'dark';
+  const setThemeMode = async (next) => {
     setTheme(next);
     await setSettings({ theme: next });
   };
 
   const resetInactivityTimer = useCallback(() => {
-    if (!pinCode) return;
+    if (!password || !autoLock) return;
     clearTimeout(inactivityRef.current);
     inactivityRef.current = setTimeout(() => setLocked(true), INACTIVITY_TIMEOUT_MS);
-  }, [pinCode]);
+  }, [password, autoLock]);
 
   useEffect(() => {
-    if (!pinCode) return;
+    if (!password || !autoLock) return;
     const events = ['mousedown', 'keydown', 'mousemove', 'touchstart', 'scroll'];
     const handler = () => resetInactivityTimer();
     events.forEach((e) => window.addEventListener(e, handler));
@@ -191,17 +221,25 @@ function Shell() {
       clearTimeout(inactivityRef.current);
       events.forEach((e) => window.removeEventListener(e, handler));
     };
-  }, [pinCode, resetInactivityTimer]);
+  }, [password, autoLock, resetInactivityTimer]);
 
   const handleUnlock = async (value) => {
-    const s = await getSettings();
-    if (value === s.pin_code) {
+    const res = await verifyPassword(value);
+    if (res && res.ok) {
       setLocked(false);
       resetInactivityTimer();
       return true;
     }
     return false;
   };
+
+  const handleSecurityChanged = useCallback(() => {
+    getSettings().then((s) => {
+      setPassword(s.security_password || '');
+      setAutoLock(s.auto_lock !== '0');
+      setLockOnStartup(s.lock_on_startup !== '0');
+    });
+  }, []);
 
   const triggerRefresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -250,10 +288,19 @@ function Shell() {
           </NavLink>
         ))}
         <div className="sidebar-theme">
-          <button onClick={toggleTheme} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
-            {theme === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19'}
-            <span className="nav-label">{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
-          </button>
+          <span className="theme-icon" title="Theme mode">
+            {theme === 'dark' ? '\uD83C\uDF19' : theme === 'device' ? '\uD83D\uDDA5\uFE0F' : '\u2600\uFE0F'}
+          </span>
+          <select
+            className="theme-select"
+            value={theme}
+            onChange={(e) => setThemeMode(e.target.value)}
+            title="Theme mode"
+          >
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+            <option value="device">Device</option>
+          </select>
         </div>
         <div className="conn-status">
           <span className={`conn-led ${ledClass}`}></span>
@@ -277,7 +324,7 @@ function Shell() {
         })}
         {Object.entries(offlineConnectors).length > 0 && (
           <div className="sidebar-offline">
-            <span className="nav-label">{Object.keys(offlineConnectors).length} connector(s) offline</span>
+            <span className="nav-label">{offlineConnectorsText(Object.keys(offlineConnectors).length)}</span>
           </div>
         )}
       </nav>
@@ -290,7 +337,7 @@ function Shell() {
           <Route path="/billing" element={<BillingPage refreshKey={refreshKey} addToast={addToast} />} />
           <Route path="/transactions" element={<TransactionsPage refreshKey={refreshKey} addToast={addToast} />} />
           <Route path="/logs" element={<LogsPage refreshKey={refreshKey} addToast={addToast} />} />
-          <Route path="/settings" element={<SettingsPage refreshKey={refreshKey} addToast={addToast} triggerRefresh={triggerRefresh} />} />
+          <Route path="/settings" element={<SettingsPage refreshKey={refreshKey} addToast={addToast} triggerRefresh={triggerRefresh} onSecurityChange={handleSecurityChanged} />} />
         </Routes>
       </main>
 
@@ -299,9 +346,78 @@ function Shell() {
   );
 
   return (
-    <>
-      {pinCode && locked && <PinLock onUnlock={handleUnlock} brandingLogo={brandingLogo} />}
+    <ContextMenuProvider>
+      {password && locked && <PinLock onSubmit={handleUnlock} brandingLogo={brandingLogo} />}
       {content}
+      <ShellOverlays locked={locked} setLocked={setLocked} />
+    </ContextMenuProvider>
+  );
+}
+
+function ShellOverlays({ locked, setLocked }) {
+  const navigate = useNavigate();
+  const { menu, closeMenu, openMenu } = useContextMenu();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const shortcuts = useKeyboardShortcuts(!locked);
+
+  useEffect(() => {
+    shortcuts.register('ctrl+k', () => setPaletteOpen(true));
+    shortcuts.register('ctrl+l', () => setLocked(true));
+    shortcuts.register('ctrl+,', () => navigate('/settings'));
+    NAV_ITEMS.forEach((item, i) => shortcuts.register(`ctrl+${i + 1}`, () => navigate(item.to)));
+    shortcuts.register('esc', () => { setPaletteOpen(false); closeMenu(); });
+    shortcuts.register('/', () => {
+      const el = document.querySelector('.content .search-bar input, .content .billing-filters input[type="text"]');
+      if (el) el.focus();
+    });
+    return () => {
+      ['ctrl+k', 'ctrl+l', 'ctrl+,', 'esc', '/'].forEach((s) => shortcuts.unregister(s));
+      NAV_ITEMS.forEach((item, i) => shortcuts.unregister(`ctrl+${i + 1}`));
+    };
+  }, [shortcuts, navigate, closeMenu, setLocked]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (locked) return;
+      const t = e.target;
+      const isInput = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+      const items = [];
+      if (isInput) {
+        items.push({ label: 'Copy', run: () => clipboardCopy() });
+        items.push({ label: 'Paste', run: () => clipboardPaste() });
+        items.push({ label: 'Cut', run: () => clipboardCut() });
+        items.push({ label: 'Select All', run: () => clipboardSelectAll() });
+        items.push({ separator: true });
+      }
+      items.push({ label: 'Lock app now', shortcut: 'Ctrl+L', run: () => setLocked(true) });
+      items.push({ label: 'Reload app', run: () => window.location.reload() });
+      items.push({ separator: true });
+      NAV_ITEMS.forEach((item) => items.push({
+        label: `Go to ${item.label}`,
+        run: () => navigate(item.to),
+      }));
+      openMenu(e, items);
+    };
+    window.addEventListener('contextmenu', handler);
+    return () => window.removeEventListener('contextmenu', handler);
+  }, [locked, openMenu, navigate, setLocked]);
+
+  const paletteActions = [
+    ...NAV_ITEMS.map((item, i) => ({
+      id: `nav-${item.to}`,
+      label: `Go to ${item.label}`,
+      shortcut: `Ctrl+${i + 1}`,
+      keywords: item.label,
+      run: () => navigate(item.to),
+    })),
+    { id: 'lock', label: 'Lock app now', shortcut: 'Ctrl+L', keywords: 'lock security password', run: () => setLocked(true) },
+    { id: 'reload', label: 'Reload app', keywords: 'restart refresh', run: () => window.location.reload() },
+  ];
+
+  return (
+    <>
+      <ContextMenu menu={menu} onClose={closeMenu} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} actions={paletteActions} />
     </>
   );
 }

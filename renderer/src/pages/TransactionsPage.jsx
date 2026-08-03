@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { listTransactions, transactionsStats, transactionsDaily, exportCsv } from '../services/ipc';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import EmptyState from '../components/EmptyState';
+import { formatDuration } from '../utils';
+import { EXPORT_CSV, EXPORTED_TO, EXPORT_FAILED, EMPTY_TRANSACTIONS, APPLY_LABEL, CLEAR_LABEL } from '../strings';
 
 export default function TransactionsPage({ addToast }) {
   const [transactions, setTransactions] = useState([]);
@@ -68,8 +70,8 @@ export default function TransactionsPage({ addToast }) {
   const handleExport = async () => {
     const cols = ['id', 'charger_id', 'connector_id', 'ocpp_tx_id', 'customer_name', 'started_at', 'stopped_at', 'duration_sec', 'energy_kwh', 'total_amount', 'soc_start', 'soc_end', 'status'];
     const result = await exportCsv({ data: sorted, columns: cols, filename: 'transactions.csv' });
-    if (result.success) addToast(`Exported to ${result.path}`, 'success');
-    else if (result.reason !== 'canceled') addToast(`Export failed: ${result.reason}`, 'error');
+    if (result.success) addToast(EXPORTED_TO(result.path), 'success');
+    else if (result.reason !== 'canceled') addToast(EXPORT_FAILED(result.reason), 'error');
   };
 
   const sortIcon = (field) => {
@@ -120,9 +122,9 @@ export default function TransactionsPage({ addToast }) {
           <input type="date" placeholder=" " value={toDate} onChange={(e) => setToDate(e.target.value)} />
           <label>To</label>
         </div>
-        <button className="btn ghost" onClick={fetchData}>Apply</button>
-        <button className="btn ghost" onClick={() => { setFromDate(''); setToDate(''); }}>Clear</button>
-        <button className="btn primary" onClick={handleExport} style={{ marginLeft: 'auto' }}>Export CSV</button>
+        <button className="btn ghost" onClick={fetchData}>{APPLY_LABEL}</button>
+        <button className="btn ghost" onClick={() => { setFromDate(''); setToDate(''); }}>{CLEAR_LABEL}</button>
+        <button className="btn primary" onClick={handleExport} style={{ marginLeft: 'auto' }}>{EXPORT_CSV}</button>
       </div>
 
       {/* Stats */}
@@ -154,7 +156,7 @@ export default function TransactionsPage({ addToast }) {
 
       {/* Table */}
       {sorted.length === 0 ? (
-        <EmptyState message="No transactions match your filters." />
+        <EmptyState message={EMPTY_TRANSACTIONS} />
       ) : (
         <div className="tx-table">
           <div className="tx-header">
@@ -194,11 +196,4 @@ function StatChip({ label, value, color }) {
       <div style={{ fontSize: 16, fontWeight: 700, color, fontFamily: "'JetBrains Mono', monospace" }}>{value}</div>
     </div>
   );
-}
-
-function formatDuration(sec) {
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
 }

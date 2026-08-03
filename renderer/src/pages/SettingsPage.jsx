@@ -1,7 +1,23 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useSettings } from '../hooks/useVoltDesk';
-import { listPrinters, testPrinter, dbBackup, dbRestore, resetApp, checkHealth, pickImage, fetchCompanyInfo, bluetoothScan, bluetoothConnect, bluetoothDisconnect, bluetoothList, bluetoothTest } from '../services/ipc';
+import useKeyboardShortcuts from '../hooks/useKeyboardShortcuts';
+import { useContextMenu } from '../hooks/useContextMenu.jsx';
+import { listPrinters, testPrinter, dbBackup, dbRestore, resetApp, checkHealth, pickImage, fetchCompanyInfo, bluetoothScan, bluetoothConnect, bluetoothDisconnect, bluetoothList, bluetoothTest, verifyPassword, getSyncStatus, syncNow } from '../services/ipc';
+import PinLock from '../components/PinLock';
 import FieldTooltip, { ENDPOINT_DOCS } from '../components/FieldTooltip';
+import {
+  VALIDATION_ERROR, SAVED_SECTION, SAVE_SECTION_FAILED, SHIFT_ADDED,
+  COMPANY_INFO_FETCH_FAILED, COMPANY_INFO_UPDATED, FOUND_DEVICES, SCAN_FAILED,
+  CONNECT_FAILED, DISCONNECT_FAILED, CONNECTED_TO, DISCONNECTED_LABEL, BT_SCAN_HINT,
+  PASSWORD_REQUIRED_PROMPT, PASSWORD_ENTER_PROMPT, PASSWORD_TOO_SHORT, PASSWORD_SAVED_REENTER,
+  PASSWORD_REMOVED, REMOVE_PASSWORD_CONFIRM, RESET_CONFIRM, RESET_SCOPE_HELP, RESET_SUCCESS,
+  RESET_CANCELED, RESET_FAILED, RESTORE_CONFIRM, RESTORE_SUCCESS, RESTORE_FAILED,
+  BACKUP_SAVED, BACKUP_FAILED, BACKUP_DATABASE, RESTORE_DATABASE, RESET_APP,
+  SYNC_RUN_COMPLETE, SYNC_FAILED, SYNC_NOW, SYNC_QUEUE_LABEL, SYNCING, REFRESH_LABEL,
+  SAVING_LABEL, SAVE_CONNECTION, SAVE_BRANDING, SAVE_RATE_SHIFTS, SAVE_BACKEND_SYNC,
+  SAVE_PRINTERS, SAVE_SECURITY, TEST_PAGE_SENT, TEST_FAILED, TEST_PRINT_LABEL, SCANNING_LABEL,
+} from '../strings';
 
 const WS_SCHEMES = ['ws:', 'wss:'];
 const HTTP_SCHEMES = ['http:', 'https:'];
@@ -19,7 +35,8 @@ function validateUrl(url, allowedSchemes, label) {
   }
 }
 
-export default function SettingsPage({ addToast, triggerRefresh }) {
+export default function SettingsPage({ addToast, triggerRefresh, onSecurityChange }) {
+  const navigate = useNavigate();
   const { settings, shifts, loading, refresh, saveSettings, saveShift, removeShift } = useSettings();
   const [form, setForm] = useState({});
   const [errors, setErrors] = useState({});
@@ -28,6 +45,31 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
   const [btDevices, setBtDevices] = useState([]);
   const [btScanning, setBtScanning] = useState(false);
   const [activeTab, setActiveTab] = useState('connection');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [gate, setGate] = useState(null);
+  const [pageUnlocked, setPageUnlocked] = useState(false);
+  const [syncStatus, setSyncStatus] = useState({ pending: 0, failed: 0, sent: 0 });
+  const [syncBusy, setSyncBusy] = useState(false);
+
+  const refreshSyncStatus = useCallback(() => {
+    getSyncStatus().then(setSyncStatus).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshSyncStatus();
+  }, [refreshSyncStatus]);
+
+  const runSyncNow = async () => {
+    setSyncBusy(true);
+    try {
+      setSyncStatus(await syncNow());
+      addToast(SYNC_RUN_COMPLETE, 'success');
+    } catch (e) {
+      addToast(SYNC_FAILED(e.message), 'error');
+    } finally {
+      setSyncBusy(false);
+    }
+  };
 
   useEffect(() => {
     listPrinters().then(setPrinters).catch(() => {});
@@ -35,9 +77,21 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
 
   useEffect(() => {
     if (settings) {
-      setForm((prev) => ({ ...prev, ...settings }));
+      const { security_password, ...rest } = settings;
+      setForm((prev) => ({ ...prev, ...rest }));
     }
   }, [settings]);
+
+  useEffect(() => {
+    if (settings && settings.security_password && !pageUnlocked) {
+      setGate({ label: 'access Settings', run: null });
+    }
+  }, [settings, pageUnlocked]);
+
+  const runProtected = (label, action) => {
+    if (!settings.security_password) { action(); return; }
+    setGate({ label, run: action });
+  };
 
   const updateField = (key, value) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -60,64 +114,142 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
     return Object.keys(e).length === 0;
   }, [form.api_base_url]);
 
-  const saveSection = async (section, patch, validateFn) => {
+  const saveSection = (section, patch, validateFn) => {
     if (validateFn && !validateFn()) {
-      addToast('Please fix validation errors before saving.', 'error');
+      addToast(VALIDATION_ERROR, 'error');
       return;
     }
-    setSavingSection(section);
-    try {
-      await saveSettings(patch);
-      addToast(`${section} saved.`, 'success');
-      if (triggerRefresh) triggerRefresh();
-    } catch (e) {
-      addToast(`Failed to save ${section.toLowerCase()}: ${e.message}`, 'error');
-    } finally {
-      setSavingSection(null);
-    }
+    runProtected(`save ${section}`, async () => {
+      setSavingSection(section);
+      try {
+        await saveSettings(patch);
+        addToast(SAVED_SECTION(section), 'success');
+        if (triggerRefresh) triggerRefresh();
+        if (section === 'Security' && onSecurityChange) onSecurityChange();
+      } catch (e) {
+        addToast(SAVE_SECTION_FAILED(section, e.message), 'error');
+      } finally {
+        setSavingSection(null);
+      }
+    });
   };
 
   const addShift = () => {
-    saveShift({
-      name: 'New Shift',
-      start_time: '00:00',
-      end_time: '23:59',
-      rate_per_kwh: '0.10',
-      tax_applicable: false,
-      tax_percent: '0',
-      active: true,
-    }).then(() => addToast('Shift added.', 'info'));
+    runProtected('add a shift', () => {
+      saveShift({
+        name: 'New Shift',
+        start_time: '00:00',
+        end_time: '23:59',
+        rate_per_kwh: '0.10',
+        tax_applicable: false,
+        tax_percent: '0',
+        active: true,
+      }).then(() => addToast(SHIFT_ADDED, 'info'));
+    });
   };
 
+  const gatedSaveShift = (shift) => runProtected('save a shift', () => saveShift(shift));
+  const gatedRemoveShift = (id) => runProtected('delete a shift', () => removeShift(id));
+
+  const saveTab = (tab) => {
+    switch (tab) {
+      case 'connection':
+        saveSection('Connection', {
+          ws_url: form.ws_url || '',
+          skip_ssl_verify: form.skip_ssl_verify || '0',
+        }, validateConnection);
+        break;
+      case 'branding':
+        saveSection('Branding', {
+          company_name: form.company_name || '',
+          company_address: form.company_address || '',
+          company_phone: form.company_phone || '',
+          company_email: form.company_email || '',
+          company_footer: form.company_footer || '',
+          branding_logo: form.branding_logo || '',
+          invoice_logo: form.invoice_logo || '',
+          show_logo_on_bill: form.show_logo_on_bill || '0',
+          bill_display_format: form.bill_display_format || 'professional',
+          service_fee: form.service_fee || '0',
+          service_charge: form.service_charge || '0',
+          bill_prefix: form.bill_prefix || 'INV',
+        });
+        break;
+      case 'pricing':
+        saveSection('Rate & Shifts', {
+          charging_rate_mode: form.charging_rate_mode === 'kw' ? 'kw' : 'percentage',
+          default_battery_capacity_kwh: form.default_battery_capacity_kwh || '',
+        });
+        break;
+      case 'printers':
+        saveSection('Printers', {
+          printer_type: form.printer_type || 'system',
+          printer_network_ip: form.printer_network_ip || '',
+          printer_network_port: form.printer_network_port || '9100',
+          bt_printer_address: form.bt_printer_address || '',
+          bt_printer_name: form.bt_printer_name || '',
+          thermal_print_mode: form.thermal_print_mode || 'raster',
+          bill_format: form.bill_format || 'thermal_80mm',
+          print_device_name: form.print_device_name || '',
+          paper_width: form.paper_width || '80',
+        });
+        break;
+      case 'backend':
+        saveSection('Backend Sync', {
+          api_base_url: form.api_base_url || '',
+          api_endpoint_bills: form.api_endpoint_bills || '',
+          api_endpoint_logs: form.api_endpoint_logs || '',
+          api_endpoint_transactions: form.api_endpoint_transactions || '',
+          api_health_endpoint: form.api_health_endpoint || '',
+          api_key: form.api_key || '',
+          api_company_info_endpoint: form.api_company_info_endpoint || '',
+          api_bill_format_endpoint: form.api_bill_format_endpoint || '',
+          api_customer_search_endpoint: form.api_customer_search_endpoint || '',
+        }, validateBackend);
+        break;
+      case 'security':
+        saveSection('Security', {
+          ...(passwordInput ? { security_password: passwordInput } : {}),
+          auto_lock: form.auto_lock || '1',
+          lock_on_startup: form.lock_on_startup || '1',
+        });
+        break;
+      default:
+        break;
+    }
+  };
+
+  const shortcuts = useKeyboardShortcuts(true);
+  useEffect(() => {
+    shortcuts.register('ctrl+s', () => {
+      if (gate) return;
+      saveTab(activeTab);
+    });
+    return () => shortcuts.unregister('ctrl+s');
+  }, [shortcuts, activeTab, form, passwordInput, gate]);
+
   const handleResetApp = async () => {
-    let configuredPin = settings.pin_code || form.pin_code || '';
-    if (!configuredPin) {
-      const nextPin = window.prompt('Set a 4-6 digit PIN before resetting the app.');
-      if (!nextPin) return;
-      if (!/^\d{4,6}$/.test(nextPin)) {
-        addToast('PIN must be 4-6 digits.', 'error');
+    if (!settings.security_password) {
+      const nextPassword = window.prompt(PASSWORD_REQUIRED_PROMPT);
+      if (!nextPassword) return;
+      if (nextPassword.length < 4) {
+        addToast(PASSWORD_TOO_SHORT, 'error');
         return;
       }
-      await saveSettings({ pin_code: nextPin });
-      updateField('pin_code', nextPin);
-      configuredPin = nextPin;
-      addToast('PIN saved. Enter it again to reset the app.', 'info');
+      await saveSettings({ security_password: nextPassword });
+      addToast(PASSWORD_SAVED_REENTER, 'info');
     }
 
-    const enteredPin = window.prompt('Enter PIN to reset the app.');
-    if (!enteredPin) return;
-    if (enteredPin !== configuredPin) {
-      addToast('Incorrect PIN. Reset canceled.', 'error');
-      return;
-    }
-    if (!window.confirm('Reset App will clear settings, shifts, chargers, logs, transactions, bills, and local sync queue. Continue?')) return;
+    const enteredPassword = window.prompt(PASSWORD_ENTER_PROMPT);
+    if (!enteredPassword) return;
+    if (!window.confirm(RESET_CONFIRM)) return;
 
-    const result = await resetApp({ pin: enteredPin });
+    const result = await resetApp({ pin: enteredPassword });
     if (!result.success) {
-      addToast(result.reason === 'invalid_pin' ? 'Incorrect PIN. Reset canceled.' : `Reset failed: ${result.reason}`, 'error');
+      addToast(result.reason === 'invalid_pin' || result.reason === 'pin_not_configured' ? RESET_CANCELED : RESET_FAILED(result.reason), 'error');
       return;
     }
-    addToast('App reset successfully.', 'success');
+    addToast(RESET_SUCCESS, 'success');
     if (triggerRefresh) triggerRefresh();
     window.location.reload();
   };
@@ -193,12 +325,9 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
           <button
             className="btn primary"
             disabled={savingSection === 'Connection'}
-            onClick={() => saveSection('Connection', {
-              ws_url: form.ws_url || '',
-              skip_ssl_verify: form.skip_ssl_verify || '0',
-            }, validateConnection)}
+            onClick={() => saveTab('connection')}
           >
-            {savingSection === 'Connection' ? 'Saving...' : 'Save Connection'}
+            {savingSection === 'Connection' ? SAVING_LABEL : SAVE_CONNECTION}
           </button>
         </div>
       )}
@@ -209,17 +338,18 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
           {(form.api_base_url && form.api_company_info_endpoint) && (
             <div className="form-group">
               <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11 }}
-                onClick={async () => {
-                  const info = await fetchCompanyInfo();
-                  if (!info) { addToast('Failed to fetch company info', 'error'); return; }
-                  if (info.company_name) updateField('company_name', info.company_name);
-                  if (info.company_address) updateField('company_address', info.company_address);
-                  if (info.company_phone) updateField('company_phone', info.company_phone);
-                  if (info.company_email) updateField('company_email', info.company_email);
-                  if (info.branding_logo) updateField('branding_logo', info.branding_logo);
-                  if (info.invoice_logo) updateField('invoice_logo', info.invoice_logo);
-                  addToast('Company info updated from API', 'success');
-                }}
+                  onClick={async () => {
+                    const info = await fetchCompanyInfo();
+                    if (!info) { addToast(COMPANY_INFO_FETCH_FAILED, 'error'); return; }
+                    if (info.company_name) updateField('company_name', info.company_name);
+                    if (info.company_address) updateField('company_address', info.company_address);
+                    if (info.company_phone) updateField('company_phone', info.company_phone);
+                    if (info.company_email) updateField('company_email', info.company_email);
+                    if (info.bill_prefix) updateField('bill_prefix', info.bill_prefix);
+                    if (info.branding_logo) updateField('branding_logo', info.branding_logo);
+                    if (info.invoice_logo) updateField('invoice_logo', info.invoice_logo);
+                    addToast(COMPANY_INFO_UPDATED, 'success');
+                  }}
               >Fetch from API</button>
             </div>
           )}
@@ -357,22 +487,9 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
           <button
             className="btn primary"
             disabled={savingSection === 'Branding'}
-            onClick={() => saveSection('Branding', {
-              company_name: form.company_name || '',
-              company_address: form.company_address || '',
-              company_phone: form.company_phone || '',
-              company_email: form.company_email || '',
-              company_footer: form.company_footer || '',
-              branding_logo: form.branding_logo || '',
-              invoice_logo: form.invoice_logo || '',
-              show_logo_on_bill: form.show_logo_on_bill || '0',
-              bill_display_format: form.bill_display_format || 'professional',
-              service_fee: form.service_fee || '0',
-              service_charge: form.service_charge || '0',
-              bill_prefix: form.bill_prefix || 'INV',
-            })}
+            onClick={() => saveTab('branding')}
           >
-            {savingSection === 'Branding' ? 'Saving...' : 'Save Branding'}
+            {savingSection === 'Branding' ? SAVING_LABEL : SAVE_BRANDING}
           </button>
         </div>
       )}
@@ -424,19 +541,16 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
           <hr style={{ border: 'none', borderTop: '1px solid #333', margin: '16px 0' }} />
           <h2>Shifts & Tax</h2>
           {shifts.map((shift) => (
-            <ShiftRow key={shift.id} shift={shift} onSave={saveShift} onDelete={removeShift} />
+            <ShiftRow key={shift.id} shift={shift} onSave={gatedSaveShift} onDelete={gatedRemoveShift} />
           ))}
           <button className="btn ghost" onClick={addShift} style={{ marginTop: 8 }}>+ Add shift</button>
           <div style={{ marginTop: 20 }}>
             <button
               className="btn primary"
               disabled={savingSection === 'Rate & Shifts'}
-              onClick={() => saveSection('Rate & Shifts', {
-                charging_rate_mode: form.charging_rate_mode === 'kw' ? 'kw' : 'percentage',
-                default_battery_capacity_kwh: form.default_battery_capacity_kwh || '',
-              })}
+              onClick={() => saveTab('pricing')}
             >
-              {savingSection === 'Rate & Shifts' ? 'Saving...' : 'Save'}
+              {savingSection === 'Rate & Shifts' ? SAVING_LABEL : SAVE_RATE_SHIFTS}
             </button>
           </div>
         </div>
@@ -460,6 +574,20 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               <input type="password" value={form.api_key || ''} onChange={(e) => updateField('api_key', e.target.value)} />
             </div>
           </div>
+          <div style={{ display: 'flex', gap: 12 }}>
+            <div className="form-group" style={{ flex: 2 }}>
+              <label>Login Endpoint <FieldTooltip endpointKey="api_login_endpoint" /></label>
+              <input value={form.api_login_endpoint || ''} onChange={(e) => updateField('api_login_endpoint', e.target.value)} placeholder="/api/login" />
+            </div>
+            <div className="form-group" style={{ flex: 1 }}>
+              <label>Username</label>
+              <input value={form.api_username || ''} onChange={(e) => updateField('api_username', e.target.value)} />
+            </div>
+            <div className="form-group" style={{ flex: 1 }}>
+              <label>Password</label>
+              <input type="password" value={form.api_password || ''} onChange={(e) => updateField('api_password', e.target.value)} />
+            </div>
+          </div>
           <hr style={{ border: 'none', borderTop: '1px solid #333', margin: '16px 0' }} />
           {[
             { key: 'api_endpoint_bills', placeholder: '/api/bills' },
@@ -468,6 +596,8 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             { key: 'api_health_endpoint', placeholder: '/api/health', test: true },
             { key: 'api_company_info_endpoint', placeholder: '/api/company' },
             { key: 'api_bill_format_endpoint', placeholder: '/api/bill/template' },
+            { key: 'api_bill_details_endpoint', placeholder: '/api/bill/details' },
+            { key: 'api_bill_number_endpoint', placeholder: '/api/bill/next-number' },
             { key: 'api_customer_search_endpoint', placeholder: '/api/customers/search' },
           ].map(({ key, placeholder, test }) => {
             const doc = ENDPOINT_DOCS[key] || null;
@@ -510,22 +640,27 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
               </div>
             );
           })}
+          <hr style={{ border: 'none', borderTop: '1px solid #333', margin: '16px 0' }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>{SYNC_QUEUE_LABEL}</span>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              <span style={{ color: 'var(--amber)', fontWeight: 600 }}>{syncStatus.pending}</span> pending
+              {' · '}
+              <span style={{ color: 'var(--danger, #e5484d)', fontWeight: 600 }}>{syncStatus.failed}</span> failed
+              {' · '}
+              <span style={{ color: 'var(--teal)', fontWeight: 600 }}>{syncStatus.sent}</span> sent
+            </span>
+            <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11 }} onClick={refreshSyncStatus}>{REFRESH_LABEL}</button>
+            <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11 }} onClick={runSyncNow} disabled={syncBusy}>
+              {syncBusy ? SYNCING : SYNC_NOW}
+            </button>
+          </div>
           <button
             className="btn primary"
             disabled={savingSection === 'Backend Sync'}
-            onClick={() => saveSection('Backend Sync', {
-              api_base_url: form.api_base_url || '',
-              api_endpoint_bills: form.api_endpoint_bills || '',
-              api_endpoint_logs: form.api_endpoint_logs || '',
-              api_endpoint_transactions: form.api_endpoint_transactions || '',
-              api_health_endpoint: form.api_health_endpoint || '',
-              api_key: form.api_key || '',
-              api_company_info_endpoint: form.api_company_info_endpoint || '',
-              api_bill_format_endpoint: form.api_bill_format_endpoint || '',
-              api_customer_search_endpoint: form.api_customer_search_endpoint || '',
-            }, validateBackend)}
+            onClick={() => saveTab('backend')}
           >
-            {savingSection === 'Backend Sync' ? 'Saving...' : 'Save Backend Sync'}
+            {savingSection === 'Backend Sync' ? SAVING_LABEL : SAVE_BACKEND_SYNC}
           </button>
         </div>
       )}
@@ -664,14 +799,14 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
                     try {
                       const devices = await bluetoothScan();
                       setBtDevices(devices || []);
-                      addToast(`Found ${(devices||[]).length} device(s)`, 'success');
+                      addToast(FOUND_DEVICES((devices || []).length), 'success');
                     } catch (e) {
-                      addToast(`Scan failed: ${e.message}`, 'error');
+                      addToast(SCAN_FAILED(e.message), 'error');
                     } finally {
                       setBtScanning(false);
                     }
                   }}
-                >{btScanning ? 'Scanning...' : '🔍 Scan'}</button>
+                >{btScanning ? SCANNING_LABEL : '🔍 Scan'}</button>
               </div>
               {btDevices.length > 0 && (
                 <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6, marginBottom: 6 }}>
@@ -693,9 +828,9 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
                                 await bluetoothDisconnect(d.address);
                                 updateField('bt_printer_address', '');
                                 updateField('bt_printer_name', '');
-                                addToast('Disconnected', 'success');
+                                addToast(DISCONNECTED_LABEL, 'success');
                               } catch (e) {
-                                addToast(`Disconnect failed: ${e.message}`, 'error');
+                                addToast(DISCONNECT_FAILED(e.message), 'error');
                               }
                             }}
                           >Disconnect</button>
@@ -706,9 +841,9 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
                                 await bluetoothConnect(d.address);
                                 updateField('bt_printer_address', d.address);
                                 updateField('bt_printer_name', d.name || '');
-                                addToast(`Connected to ${d.name || d.address}`, 'success');
+                                addToast(CONNECTED_TO(d.name || d.address), 'success');
                               } catch (e) {
-                                addToast(`Connect failed: ${e.message}`, 'error');
+                                addToast(CONNECT_FAILED(e.message), 'error');
                               }
                             }}
                           >Connect</button>
@@ -720,9 +855,7 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
                 </div>
               )}
               {btDevices.length === 0 && (
-                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                  Click <strong>Scan</strong> to discover nearby Bluetooth printers.
-                </p>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }} dangerouslySetInnerHTML={{ __html: BT_SCAN_HINT }} />
               )}
             </div>
           )}
@@ -731,19 +864,9 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             <button
               className="btn primary"
               disabled={savingSection === 'Printers'}
-              onClick={() => saveSection('Printers', {
-                printer_type: form.printer_type || 'system',
-                printer_network_ip: form.printer_network_ip || '',
-                printer_network_port: form.printer_network_port || '9100',
-                bt_printer_address: form.bt_printer_address || '',
-                bt_printer_name: form.bt_printer_name || '',
-                thermal_print_mode: form.thermal_print_mode || 'raster',
-                bill_format: form.bill_format || 'thermal_80mm',
-                print_device_name: form.print_device_name || '',
-                paper_width: form.paper_width || '80',
-              })}
+              onClick={() => saveTab('printers')}
             >
-              {savingSection === 'Printers' ? 'Saving...' : 'Save Printers'}
+              {savingSection === 'Printers' ? SAVING_LABEL : SAVE_PRINTERS}
             </button>
             <button className="btn ghost" style={{ padding: '6px 12px', fontSize: 11 }}
               onClick={async () => {
@@ -754,10 +877,10 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
                   port: form.printer_network_port,
                   comName: form.bt_printer_address,
                 });
-                if (result.success) addToast('Test page sent to printer', 'success');
-                else addToast(`Test failed: ${result.failureReason || result.reason}`, 'error');
+                if (result.success) addToast(TEST_PAGE_SENT, 'success');
+                else addToast(TEST_FAILED(result), 'error');
               }}
-            >Test Print</button>
+            >{TEST_PRINT_LABEL}</button>
           </div>
         </div>
       )}
@@ -766,26 +889,71 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
         <div className="settings-card">
           <h2>Security</h2>
           <div className="form-group">
-            <label>PIN Code (for locking the app)</label>
-            <input
-              type="password"
-              value={form.pin_code || ''}
-              onChange={(e) => updateField('pin_code', e.target.value)}
-              placeholder="4-6 digit PIN"
-              maxLength={6}
-              pattern="[0-9]*"
-              inputMode="numeric"
-            />
+            <label>Security Password</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                placeholder={settings.security_password ? 'Leave blank to keep current password' : 'Minimum 4 characters'}
+                maxLength={64}
+                autoComplete="new-password"
+                style={{ flex: 1 }}
+              />
+              {settings.security_password && (
+                <button
+                  className="btn ghost"
+                  style={{ whiteSpace: 'nowrap' }}
+                  onClick={() => {
+                    if (!window.confirm(REMOVE_PASSWORD_CONFIRM)) return;
+                    runProtected('remove the password', async () => {
+                      await saveSettings({ security_password: '' });
+                      setPasswordInput('');
+                      addToast(PASSWORD_REMOVED, 'success');
+                      if (onSecurityChange) onSecurityChange();
+                    });
+                  }}
+                >Remove</button>
+              )}
+            </div>
+          </div>
+          <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                id="auto_lock"
+                checked={form.auto_lock !== '0'}
+                onChange={(e) => updateField('auto_lock', e.target.checked ? '1' : '0')}
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <label htmlFor="auto_lock" style={{ margin: 0, cursor: 'pointer' }}>
+              Lock the app after 5 minutes of inactivity
+            </label>
+          </div>
+          <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                id="lock_on_startup"
+                checked={form.lock_on_startup !== '0'}
+                onChange={(e) => updateField('lock_on_startup', e.target.checked ? '1' : '0')}
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <label htmlFor="lock_on_startup" style={{ margin: 0, cursor: 'pointer' }}>
+              Lock the app on startup
+            </label>
           </div>
           <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-            When set, the app will lock after 5 minutes of inactivity. Enter the PIN to unlock.
+            Default password is "admin". When a password is set, opening Settings and saving any setting requires the password.
           </p>
           <button
             className="btn primary"
             disabled={savingSection === 'Security'}
-            onClick={() => saveSection('Security', { pin_code: form.pin_code || '' })}
+            onClick={() => saveTab('security')}
           >
-            {savingSection === 'Security' ? 'Saving...' : 'Save Security'}
+            {savingSection === 'Security' ? SAVING_LABEL : SAVE_SECURITY}
           </button>
         </div>
       )}
@@ -797,31 +965,54 @@ export default function SettingsPage({ addToast, triggerRefresh }) {
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="btn ghost" onClick={async () => {
                 const r = await dbBackup();
-                if (r.success) addToast(`Backup saved to ${r.path}`, 'success');
-                else if (r.reason !== 'canceled') addToast(`Backup failed: ${r.reason}`, 'error');
-              }}>Backup Database</button>
+                if (r.success) addToast(BACKUP_SAVED(r.path), 'success');
+                else if (r.reason !== 'canceled') addToast(BACKUP_FAILED(r.reason), 'error');
+              }}>{BACKUP_DATABASE}</button>
               <button className="btn danger" onClick={async () => {
-                if (!confirm('Restore will replace all current data. Continue?')) return;
-                const r = await dbRestore();
-                if (r.success) { addToast('Database restored successfully.', 'success'); if (triggerRefresh) triggerRefresh(); }
-                else if (r.reason !== 'canceled') addToast(`Restore failed: ${r.reason}`, 'error');
-              }}>Restore Database</button>
+                if (!confirm(RESTORE_CONFIRM)) return;
+                runProtected('restore the database', async () => {
+                  const r = await dbRestore();
+                  if (r.success) { addToast(RESTORE_SUCCESS, 'success'); if (triggerRefresh) triggerRefresh(); }
+                  else if (r.reason !== 'canceled') addToast(RESTORE_FAILED(r.reason), 'error');
+                });
+              }}>{RESTORE_DATABASE}</button>
             </div>
           </div>
           <div className="settings-card">
-            <h2>Reset App</h2>
+            <h2>{RESET_APP}</h2>
             <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
-              Clears local settings, charger state, shifts, logs, transactions, bills and sync queue.
+              {RESET_SCOPE_HELP}
             </p>
-            <button className="btn danger" onClick={handleResetApp}>Reset App</button>
+            <button className="btn danger" onClick={handleResetApp}>{RESET_APP}</button>
           </div>
         </>
+      )}
+
+      {gate && (
+        <PinLock
+          onSubmit={async (value) => {
+            const res = await verifyPassword(value);
+            if (res && res.ok) {
+              const { run } = gate;
+              const isPageGate = !run;
+              setGate(null);
+              if (isPageGate) setPageUnlocked(true);
+              else run();
+              return true;
+            }
+            return false;
+          }}
+          onCancel={gate.run ? () => setGate(null) : () => navigate('/')}
+          prompt={`Enter password to ${gate.label}`}
+          buttonLabel={gate.run ? 'Confirm' : 'Unlock'}
+        />
       )}
     </>
   );
 }
 
 function ShiftRow({ shift, onSave, onDelete }) {
+  const { openMenu } = useContextMenu();
   const [local, setLocal] = useState({ ...shift });
 
   useEffect(() => {
@@ -833,8 +1024,15 @@ function ShiftRow({ shift, onSave, onDelete }) {
     setLocal(updated);
   };
 
+  const handleContextMenu = (e) => {
+    openMenu(e, [
+      { label: 'Save shift', run: () => onSave(local) },
+      { label: 'Delete shift', danger: true, run: () => onDelete(shift.id) },
+    ]);
+  };
+
   return (
-    <div className="shift-row" style={{ marginBottom: 8 }}>
+    <div className="shift-row" style={{ marginBottom: 8 }} onContextMenu={handleContextMenu}>
       <div className="form-group">
         <label>Name</label>
         <input value={local.name || ''} onChange={(e) => update('name', e.target.value)} />

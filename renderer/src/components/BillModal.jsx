@@ -1,8 +1,16 @@
 import { useEffect, useState } from 'react';
 import { generateBillPdf, generateBillImage, getBillPreview } from '../services/ipc';
+import { base64ToBlob, withTimeout } from '../utils';
+import { IMAGE_GEN_TIMEOUT_MS } from '../constants';
+import ShareModal from './ShareModal';
+import {
+  IMAGE_TIMED_OUT, IMAGE_FAILED, IMAGE_COPIED, IMAGE_COPY_FAILED,
+  PDF_SAVED, PDF_FAILED, PRINT_LABEL, SHARE_LABEL, DOWNLOAD_PDF, COPY_LABEL, LOADING_PREVIEW,
+} from '../strings';
 
 export default function BillModal({ bill, onClose, onPrint, addToast }) {
   const [previewHtml, setPreviewHtml] = useState(null);
+  const [showShare, setShowShare] = useState(false);
 
   useEffect(() => {
     if (!bill) return;
@@ -11,58 +19,35 @@ export default function BillModal({ bill, onClose, onPrint, addToast }) {
     }).catch(() => {});
   }, [bill]);
 
-  const handleShare = async () => {
-    const result = await generateBillImage(bill.id);
-    if (!result.success) { addToast(`Image failed: ${result.reason}`, 'error'); return; }
-    const blob = base64ToBlob(result.data, 'image/png');
-    if (navigator.share) {
-      try {
-        const file = new File([blob], result.name, { type: 'image/png' });
-        await navigator.share({ files: [file], title: bill.bill_number });
-        return;
-      } catch (e) {
-        if (e.name !== 'AbortError') addToast(`Share failed: ${e.message}`, 'error');
-        return;
-      }
-    }
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = result.name;
-    a.click();
-    URL.revokeObjectURL(url);
-    addToast(`Image saved as ${result.name}`, 'success');
-  };
-
   const handleCopyImage = async () => {
-    const result = await generateBillImage(bill.id);
-    if (!result.success) { addToast(`Image failed: ${result.reason}`, 'error'); return; }
+    let result;
+    try {
+      result = await withTimeout(generateBillImage(bill.id), IMAGE_GEN_TIMEOUT_MS);
+    } catch {
+      addToast(IMAGE_TIMED_OUT, 'error');
+      return;
+    }
+    if (!result.success) { addToast(IMAGE_FAILED(result.reason), 'error'); return; }
     try {
       const blob = base64ToBlob(result.data, 'image/png');
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      addToast('Invoice image copied to clipboard', 'success');
+      addToast(IMAGE_COPIED, 'success');
     } catch {
-      addToast('Failed to copy image to clipboard', 'error');
+      addToast(IMAGE_COPY_FAILED, 'error');
     }
   };
 
   const handleDownload = async () => {
     const result = await generateBillPdf(bill.id);
-    if (!result.success) { addToast(`PDF failed: ${result.reason}`, 'error'); return; }
+    if (!result.success) { addToast(PDF_FAILED(result.reason), 'error'); return; }
     const blob = base64ToBlob(result.data, 'application/pdf');
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = result.name;
     a.click();
     URL.revokeObjectURL(url);
-    addToast(`PDF saved as ${result.name}`, 'success');
+    addToast(PDF_SAVED(result.name), 'success');
   };
-
-  function base64ToBlob(b64, mime) {
-    const bin = atob(b64);
-    const u8 = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-    return new Blob([u8], { type: mime });
-  }
 
   if (!bill) return null;
 
@@ -79,16 +64,24 @@ export default function BillModal({ bill, onClose, onPrint, addToast }) {
               sandbox="allow-same-origin"
             />
           ) : (
-            <div className="empty-state"><p>Loading preview...</p></div>
+            <div className="empty-state"><p>{LOADING_PREVIEW}</p></div>
           )}
         </div>
         <div className="modal-actions">
-          <button className="btn primary" onClick={() => onPrint(bill.id)}>Print</button>
-          <button className="btn ghost" onClick={handleShare}>Share</button>
-          <button className="btn ghost" onClick={handleDownload}>Download PDF</button>
-          <button className="btn ghost" onClick={handleCopyImage}>Copy</button>
+          <button className="btn primary" onClick={() => onPrint(bill.id)}>{PRINT_LABEL}</button>
+          <button className="btn ghost" onClick={() => setShowShare(true)}>{SHARE_LABEL}</button>
+          <button className="btn ghost" onClick={handleDownload}>{DOWNLOAD_PDF}</button>
+          <button className="btn ghost" onClick={handleCopyImage}>{COPY_LABEL}</button>
         </div>
       </div>
+
+      {showShare && (
+        <ShareModal
+          bill={bill}
+          onClose={() => setShowShare(false)}
+          addToast={addToast}
+        />
+      )}
     </div>
   );
 }

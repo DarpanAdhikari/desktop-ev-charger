@@ -3,6 +3,8 @@ import { useChargers, useBills, useLiveEvents } from '../hooks/useVoltDesk';
 import { transactionsDaily, listTransactions } from '../services/ipc';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import ChargerStatusCard from '../components/ChargerStatusCard';
+import { EMPTY_ENERGY_CHART, EMPTY_RECENT_SESSIONS } from '../strings';
+import { DASHBOARD_DAYS, RECENT_SESSIONS_LIMIT, DATA_REFRESH_MS } from '../constants';
 
 function daysAgo(n) {
   const d = new Date();
@@ -22,7 +24,7 @@ export default function DashboardPage({ addToast, offlineConnectors }) {
     let mounted = true;
     (async () => {
       try {
-        const from = daysAgo(7);
+        const from = daysAgo(DASHBOARD_DAYS);
         const daily = await transactionsDaily({ fromDate: from });
         if (mounted) setDailyData((daily || []).map((d) => ({
           day: d.day ? d.day.slice(5) : '?',
@@ -33,7 +35,7 @@ export default function DashboardPage({ addToast, offlineConnectors }) {
     })();
     (async () => {
       try {
-        const txs = await listTransactions({ limit: 10 });
+        const txs = await listTransactions({ limit: RECENT_SESSIONS_LIMIT });
         if (mounted) setRecentSessions(
           (txs || [])
             .filter((t) => t.status === 'stopped' || t.stopped_at)
@@ -43,21 +45,21 @@ export default function DashboardPage({ addToast, offlineConnectors }) {
     })();
     const interval = setInterval(async () => {
       try {
-        const from = daysAgo(7);
+        const from = daysAgo(DASHBOARD_DAYS);
         const daily = await transactionsDaily({ fromDate: from });
         if (mounted) setDailyData((daily || []).map((d) => ({
           day: d.day ? d.day.slice(5) : '?',
           sessions: d.count || 0,
           energy: d.energy || 0,
         })));
-        const txs = await listTransactions({ limit: 10 });
+        const txs = await listTransactions({ limit: RECENT_SESSIONS_LIMIT });
         if (mounted) setRecentSessions(
           (txs || [])
             .filter((t) => t.status === 'stopped' || t.stopped_at)
             .slice(0, 8)
         );
       } catch {}
-    }, 30000);
+    }, DATA_REFRESH_MS);
     return () => { mounted = false; clearInterval(interval); };
   }, []);
 
@@ -167,7 +169,7 @@ export default function DashboardPage({ addToast, offlineConnectors }) {
           </h2>
           <div className="chgr-grid" style={{ marginBottom: 20 }}>
             {chargers.map((ch) => (
-              <ChargerStatusCard key={ch.id} charger={ch} offlineConnectors={offlineConnectors} />
+              <ChargerStatusCard key={ch.id} charger={ch} offlineConnectors={offlineConnectors} addToast={addToast} />
             ))}
           </div>
         </>
@@ -188,7 +190,7 @@ export default function DashboardPage({ addToast, offlineConnectors }) {
         <div className="dash-section">
           <h2>Energy Last 7 Days</h2>
           {dailyData.length === 0 ? (
-            <p className="dash-empty">No data yet.</p>
+            <p className="dash-empty">{EMPTY_ENERGY_CHART}</p>
           ) : (
             <>
               <div className="dash-mini-stat">
@@ -216,7 +218,7 @@ export default function DashboardPage({ addToast, offlineConnectors }) {
         <div className="dash-section">
           <h2>Recent Sessions</h2>
           {recentSessions.length === 0 ? (
-            <p className="dash-empty">No completed sessions yet.</p>
+            <p className="dash-empty">{EMPTY_RECENT_SESSIONS}</p>
           ) : (
             <div className="dash-sessions">
               <div className="dash-session-header">

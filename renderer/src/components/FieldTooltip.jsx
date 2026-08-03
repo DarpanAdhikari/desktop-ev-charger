@@ -57,6 +57,27 @@ export const ENDPOINT_DOCS = {
     request: 'GET ?q=<search query>',
     response: '[{ customer_id (required), customer_name (required), customer_pan, customer_address, customer_vehicle }]',
   },
+  api_bill_number_endpoint: {
+    label: 'Bill Number',
+    method: 'GET',
+    description: 'Fetches the next invoice number from the server before a bill is created. The number is pre-fetched and cached, so billing never blocks on the network; the local sequence is used as fallback while offline.',
+    request: 'GET —',
+    response: '{ bill_number: "INV-00042" } (also accepts next_bill_number, number, or a { data: {...} } wrapper)',
+  },
+  api_bill_details_endpoint: {
+    label: 'Bill Details',
+    method: 'GET',
+    description: 'When the Custom display format is selected, the app fetches the bill from this endpoint (queried with ?bill_number=) and renders it with the remote template. Falls back to the local bill on failure.',
+    request: 'GET ?bill_number=<number>',
+    response: '{ bill_number, total, energy_kwh, ... } (or a { data: {...} } / { bill: {...} } wrapper)',
+  },
+  api_login_endpoint: {
+    label: 'Login',
+    method: 'POST',
+    description: 'Login endpoint for token-based auth. The app POSTs { username, password } on startup and when the token expires, then uses the token as the Bearer header for all API calls. Falls back to the static API key when empty.',
+    request: '{ username, password }',
+    response: '{ access_token, expires_in } (also accepts token / jwt and token_lifetime / expires_at)',
+  },
 };
 
 export default function FieldTooltip({ endpointKey }) {

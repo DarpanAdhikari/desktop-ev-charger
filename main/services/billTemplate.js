@@ -48,6 +48,17 @@ function getPrintableWidth(settings) {
   return Math.max(pw - 4, 30) + 'mm';
 }
 
+// Cumulative meter counter at session start/end, when captured.
+function meterEnergy(bill, tx) {
+  const start = bill.meter_energy_start_kwh != null ? bill.meter_energy_start_kwh : tx.meter_energy_start_kwh;
+  const end = bill.meter_energy_end_kwh != null ? bill.meter_energy_end_kwh : tx.meter_energy_end_kwh;
+  if (start == null && end == null) return null;
+  return {
+    start: start != null ? Number(start).toFixed(2) : null,
+    end: end != null ? Number(end).toFixed(2) : null,
+  };
+}
+
 function renderBillHtmlOriginal(bill, tx, settings, forPrint = true) {
   const isThermal = settings.bill_format === 'thermal_80mm';
   const width = isThermal ? getPrintableWidth(settings) : '210mm';
@@ -107,6 +118,16 @@ function renderBillHtmlOriginal(bill, tx, settings, forPrint = true) {
   ${bill.customer_pan ? `<div class="row"><span>PAN</span><span>${bill.customer_pan}</span></div>` : ''}
   ${bill.customer_vehicle ? `<div class="row"><span>Vehicle</span><span>${bill.customer_vehicle}</span></div>` : ''}
   <div class="row"><span>Energy</span><span>${(bill.energy_kwh ?? 0).toFixed(3)} kWh</span></div>
+  ${
+    (() => {
+      const me = meterEnergy(bill, tx);
+      if (!me) return '';
+      return (
+        (me.start != null ? `<div class="row"><span>Meter Start</span><span>${me.start} kWh</span></div>` : '') +
+        (me.end != null ? `<div class="row"><span>Meter End</span><span>${me.end} kWh</span></div>` : '')
+      );
+    })()
+  }
   <div class="row"><span>Rate</span><span>${(bill.rate_per_kwh ?? 0).toFixed(2)} / kWh</span></div>
   <hr>
   <div class="row"><span>Subtotal</span><span>${bill.subtotal.toFixed(2)}</span></div>
@@ -218,6 +239,16 @@ function renderBillHtmlEnhanced(bill, tx, settings, forPrint = true) {
   <hr>
   <div class="section-title">Energy &amp; Rate</div>
   ${row('Energy Delivered', `${(bill.energy_kwh || 0).toFixed(3)} kWh`)}
+  ${
+    (() => {
+      const me = meterEnergy(bill, tx);
+      if (!me) return '';
+      return (
+        (me.start != null ? row('Meter Start', `${me.start} kWh`) : '') +
+        (me.end != null ? row('Meter End', `${me.end} kWh`) : '')
+      );
+    })()
+  }
   ${bill.rate_name ? row('Rate Type', bill.rate_name) : ''}
   ${row('Rate per kWh', `${(bill.rate_per_kwh || 0).toFixed(2)}`)}
   <hr>
@@ -275,6 +306,11 @@ function renderBillHtmlRemote(bill, tx, settings) {
     duration_sec: tx.duration_sec != null ? formatDuration(tx.duration_sec) : '-',
     soc_delta: bill.soc_start != null && bill.soc_end != null ? String(bill.soc_end - bill.soc_start) : '',
     rate_name: bill.rate_name || '',
+    max_power_kw: bill.max_power_kw != null ? Number(bill.max_power_kw).toFixed(2) : '',
+    avg_power_kw: bill.avg_power_kw != null ? Number(bill.avg_power_kw).toFixed(2) : '',
+    last_power_kw: bill.last_power_kw != null ? Number(bill.last_power_kw).toFixed(2) : '',
+    meter_energy_start_kwh: bill.meter_energy_start_kwh != null ? Number(bill.meter_energy_start_kwh).toFixed(2) : '',
+    meter_energy_end_kwh: bill.meter_energy_end_kwh != null ? Number(bill.meter_energy_end_kwh).toFixed(2) : '',
     show_logo_on_bill: settings.show_logo_on_bill || '0',
     invoice_logo: settings.invoice_logo || '',
     branding_logo: settings.branding_logo || '',
@@ -410,6 +446,16 @@ function renderBillHtmlProfessional(bill, tx, settings, forPrint = true) {
         <td class="right">${(bill.rate_per_kwh || 0).toFixed(2)}</td>
         <td class="right">${(bill.subtotal || 0).toFixed(2)}</td>
       </tr>
+      ${
+        (() => {
+          const me = meterEnergy(bill, tx);
+          if (!me) return '';
+          return (
+            (me.start != null ? `<tr><td class="sub" colspan="4">Meter Start: ${me.start} kWh</td></tr>` : '') +
+            (me.end != null ? `<tr><td class="sub" colspan="4">Meter End: ${me.end} kWh</td></tr>` : '')
+          );
+        })()
+      }
       ${bill.rate_name ? `<tr><td class="sub" colspan="4">Rate Plan: ${bill.rate_name}</td></tr>` : ''}
       ${hasServiceFee ? `<tr><td>Service Fee</td><td>—</td><td class="right">—</td><td class="right">${(bill.service_fee || 0).toFixed(2)}</td></tr>` : ''}
       ${hasServiceCharge ? `<tr><td>Service Charge</td><td>—</td><td class="right">—</td><td class="right">${(bill.service_charge || 0).toFixed(2)}</td></tr>` : ''}

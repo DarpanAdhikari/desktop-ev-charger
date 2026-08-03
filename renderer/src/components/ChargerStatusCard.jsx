@@ -1,7 +1,49 @@
 import { useNavigate } from 'react-router-dom';
+import { useContextMenu } from '../hooks/useContextMenu.jsx';
+import { sendAction } from '../services/ipc';
+import { formatRate, formatCurrency, formatMin, statusDotClass } from '../utils';
+import { ATTENTION_ACTION, CONNECTOR_START, CONNECTOR_STOP, OPEN_CHARGER, commandSentText, commandRejectedText, failedToSendText } from '../strings';
 
-export default function ChargerStatusCard({ charger, offlineConnectors }) {
+export default function ChargerStatusCard({ charger, offlineConnectors, addToast }) {
   const navigate = useNavigate();
+  const { openMenu } = useContextMenu();
+
+  const sendQuickAction = async (connectorId, action) => {
+    try {
+      const result = await sendAction({
+        charger_id: charger.id,
+        connector_id: connectorId,
+        action,
+      });
+      if (result.sent) addToast(commandSentText(action, charger.id, connectorId), 'info');
+      else addToast(commandRejectedText(action, result.reason), 'error');
+    } catch (e) {
+      addToast(failedToSendText(action, e.message), 'error');
+    }
+  };
+
+  const handleContextMenu = (e) => {
+    const items = [
+      { label: OPEN_CHARGER(charger.id), run: () => navigate(`/chargers/${charger.id}`) },
+      { separator: true },
+    ];
+    (charger.connectors || []).forEach((con) => {
+      const st = (con.status || '').toLowerCase();
+      const canStart = ['available', 'preparing'].includes(st);
+      const canStop = (charger.active_transactions || []).some((tx) => tx.connector_id === con.connector_id);
+      items.push({
+        label: CONNECTOR_START(con.connector_id),
+        disabled: !canStart,
+        run: () => sendQuickAction(con.connector_id, 'START'),
+      });
+      items.push({
+        label: CONNECTOR_STOP(con.connector_id),
+        disabled: !canStop,
+        run: () => sendQuickAction(con.connector_id, 'STOP'),
+      });
+    });
+    openMenu(e, items);
+  };
   const hasActiveTx = (charger.active_transactions || []).length > 0;
   const allOffline = (charger.connectors || []).length > 0 && (charger.connectors || []).every(
     (c) => offlineConnectors?.[`${charger.id}:${c.connector_id}`]
@@ -31,10 +73,16 @@ export default function ChargerStatusCard({ charger, offlineConnectors }) {
     <div
       className={`chgr-card chgr-${statusKey} ${hasFault ? 'chgr-fault' : ''}`}
       onClick={() => navigate(`/chargers/${charger.id}`)}
+      onContextMenu={handleContextMenu}
     >
       {/* Top bar: charger ID + status badge */}
       <div className="chgr-top">
         <span className="chgr-id">{charger.id}</span>
+        {(charger.active_transactions || []).some((tx) => tx.flagged) && (
+          <span className="chgr-attention" title={`Session needs attention \u2014 ${ATTENTION_ACTION}`}>
+            ATTENTION
+          </span>
+        )}
         <span className={`chgr-badge ${statusKey}`}>
           {statusKey === 'charging' ? 'CHARGING' : statusKey === 'offline' ? 'OFFLINE' : 'ONLINE'}
         </span>
@@ -148,34 +196,4 @@ function countStatuses(connectors) {
     else counts.other++;
   });
   return counts;
-}
-
-function statusDotClass(status, meter) {
-  const isLiveCharging = Number(meter?.power_kw ?? meter?.rate_kw) > 0;
-  switch (isLiveCharging ? 'charging' : (status || '').toLowerCase()) {
-    case 'charging': return 'dot-charging';
-    case 'available': return 'dot-available';
-    case 'faulted':
-    case 'error': return 'dot-faulted';
-    default: return 'dot-other';
-  }
-}
-
-function formatMin(min) {
-  if (min < 60) return `${min}m`;
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  return `${h}h ${m}m`;
-}
-
-function formatRate(value, unit) {
-  const num = Number(value);
-  if (!Number.isFinite(num) || num <= 0) return null;
-  return `${num.toFixed(unit === 'kW' ? 1 : 2)} ${unit}`;
-}
-
-function formatCurrency(value) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return null;
-  return `$${num.toFixed(2)}`;
 }

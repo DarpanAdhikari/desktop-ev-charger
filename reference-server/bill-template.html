@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{{company_name}} invoice {{bill_number}}</title>
+<style>
+  @page { size: 80mm auto; margin: 4mm; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+    color: #1a1a1a; max-width: 72mm; margin: 0 auto;
+    font-size: 11px; line-height: 1.6;
+  }
+  .brand { text-align: center; padding-bottom: 8px; border-bottom: 1px dashed #1a1a1a; margin-bottom: 8px; }
+  .brand h1 { font-size: 15px; letter-spacing: 1px; }
+  .brand .meta { font-size: 10px; }
+  table { width: 100%; border-collapse: collapse; margin: 6px 0; }
+  td { padding: 2px 0; vertical-align: top; }
+  td.r { text-align: right; }
+  tr.total td { border-top: 1px dashed #1a1a1a; font-weight: 700; padding-top: 4px; }
+  .thx { text-align: center; margin-top: 8px; font-size: 10px; }
+</style>
+</head>
+<body>
+  <div class="brand">
+    <h1>{{company_name}}</h1>
+    <div class="meta">{{created_at}}</div>
+    <div class="meta">INVOICE {{bill_number}}</div>
+  </div>
+
+  <table>
+    <tr><td>Charger</td><td class="r">{{charger_id}} / {{connector_id}}</td></tr>
+    <tr><td>Started</td><td class="r">{{started_at}}</td></tr>
+    <tr><td>Stopped</td><td class="r">{{stopped_at}}</td></tr>
+    <tr><td>Duration</td><td class="r">{{duration_sec}}</td></tr>
+  </table>
+
+  <table>
+    <tr><td>Customer</td><td class="r">{{customer_name}}</td></tr>
+    <tr><td>ID</td><td class="r">{{customer_id}}</td></tr>
+    <tr><td>PAN</td><td class="r">{{customer_pan}}</td></tr>
+    <tr><td>Vehicle</td><td class="r">{{customer_vehicle}}</td></tr>
+  </table>
+
+  <table>
+    <tr><td>Meter Start</td><td class="r">{{meter_energy_start_kwh}} kWh</td></tr>
+    <tr><td>Meter End</td><td class="r">{{meter_energy_end_kwh}} kWh</td></tr>
+    <tr><td>Energy</td><td class="r">{{energy_kwh}} kWh</td></tr>
+    <tr><td>SoC</td><td class="r">{{soc_start}}% &rarr; {{soc_end}}%</td></tr>
+    <tr><td>Rate</td><td class="r">{{rate_name}} {{rate_per_kwh}}</td></tr>
+    <tr><td>Subtotal</td><td class="r">{{subtotal}}</td></tr>
+    <tr><td>Tax ({{tax_percent}}%)</td><td class="r">{{tax_amount}}</td></tr>
+    <tr><td>Service Fee</td><td class="r">{{service_fee}}</td></tr>
+    <tr><td>Service Charge</td><td class="r">{{service_charge}}</td></tr>
+    <tr class="total"><td>Total</td><td class="r">{{total}}</td></tr>
+  </table>
+
+  <div class="thx">Thank you for charging with {{company_name}}!</div>
+</body>
+</html>

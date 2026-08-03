@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { useChargers, useLiveEvents } from '../hooks/useVoltDesk';
 import EmptyState from '../components/EmptyState';
 import ChargerStatusCard from '../components/ChargerStatusCard';
+import { EMPTY_CHARGERS, LOADING_CHARGERS } from '../strings';
 
 export default function ChargersPage({ refreshKey, addToast, offlineConnectors }) {
   const { chargers, loading, refresh } = useChargers();
@@ -23,7 +24,7 @@ export default function ChargersPage({ refreshKey, addToast, offlineConnectors }
   }, [chargers, search]);
 
   if (loading) {
-    return <div className="empty-state"><p>Loading chargers...</p></div>;
+    return <div className="empty-state"><p>{LOADING_CHARGERS}</p></div>;
   }
 
   return (
@@ -43,11 +44,11 @@ export default function ChargersPage({ refreshKey, addToast, offlineConnectors }
       </div>
 
       {filtered.length === 0 ? (
-        <EmptyState message="No chargers found. Ensure the CSMS WebSocket is connected in Settings." />
+        <EmptyState message={EMPTY_CHARGERS} />
       ) : (
         <div className="chgr-grid">
           {filtered.map((charger) => (
-            <ChargerStatusCard key={charger.id} charger={charger} offlineConnectors={offlineConnectors} />
+            <ChargerStatusCard key={charger.id} charger={charger} offlineConnectors={offlineConnectors} addToast={addToast} />
           ))}
         </div>
       )}

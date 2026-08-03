@@ -3,11 +3,16 @@ const { exec, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const {
+  DAEMON_TIMEOUT_MS,
+  DAEMON_SPAWN_TIMEOUT_MS,
+  SCRIPT_TIMEOUT_MS,
+  SERIAL_BAUD_TIMEOUT_MS,
+  PROC_KILL_GRACE_MS,
+  BT_PNP_QUERY_TIMEOUT_MS,
+  BT_HEALTH_INTERVAL_MS,
+} = require('../constants');
 
-const DAEMON_TIMEOUT = 30000;
-const DAEMON_SPAWN_TIMEOUT = 15000;
-const SCRIPT_TIMEOUT = 60000;
-const SERIAL_BAUD_TIMEOUT = 5000;
 const BT_BAUD_RATES = [9600, 19200, 38400, 115200, 57600, 230400];
 
 function execAsync(command, timeout) {
@@ -49,7 +54,7 @@ async function execRfcommScript(command, address, data, deviceName) {
         if (tmpFile) cmd += ` -DataFilePath "${tmpFile}"`;
         else if (data) cmd += ` -Data "${data}"`;
         if (deviceName) cmd += ` -DeviceName "${deviceName}"`;
-        const { stdout } = await execAsync(cmd, SCRIPT_TIMEOUT);
+        const { stdout } = await execAsync(cmd, SCRIPT_TIMEOUT_MS);
         return JSON.parse(stdout.trim());
       } catch (err) {
         errors.push(`${shell}: ${err.message}`);
@@ -113,7 +118,7 @@ class BluetoothDaemonManager {
       const timer = setTimeout(() => {
         session.pending.delete(0);
         resolve({ success: false, error: 'Daemon connection timeout' });
-      }, DAEMON_SPAWN_TIMEOUT);
+      }, DAEMON_SPAWN_TIMEOUT_MS);
 
       session.pending.set(0, {
         resolve: (resp) => {
@@ -165,7 +170,7 @@ class BluetoothDaemonManager {
     } catch {} finally {
       if (session.proc && !session.proc.killed) {
         try { session.proc.stdin.end(); } catch {}
-        setTimeout(() => { try { session.proc.kill(); } catch {} }, 2000);
+        setTimeout(() => { try { session.proc.kill(); } catch {} }, PROC_KILL_GRACE_MS);
       }
       this.sessions.delete(macAddress);
     }
@@ -185,7 +190,7 @@ class BluetoothDaemonManager {
       if (!session || !session.proc.stdin?.writable) return reject(new Error('Session not available'));
       const id = session.nextId++;
       command.id = id;
-      const timer = setTimeout(() => { session.pending.delete(id); reject(new Error('Command timeout')); }, DAEMON_TIMEOUT);
+      const timer = setTimeout(() => { session.pending.delete(id); reject(new Error('Command timeout')); }, DAEMON_TIMEOUT_MS);
       session.pending.set(id, { resolve, reject, timer });
       try { session.proc.stdin.write(JSON.stringify(command) + '\n'); }
       catch (err) { clearTimeout(timer); session.pending.delete(id); reject(err); }
@@ -212,7 +217,7 @@ async function scanBluetooth() {
   try {
     const { stdout } = await execAsync(
       `powershell -NoProfile -Command "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -and $_.InstanceId -notlike 'BTH*LOCALMFG*' -and $_.FriendlyName -notlike '*Bluetooth*adapter*' -and $_.FriendlyName -notlike '*Radio*' } | Select-Object FriendlyName, InstanceId, Status | ConvertTo-Json -Compress"`,
-      15000
+      DAEMON_SPAWN_TIMEOUT_MS
     );
     if (stdout.trim()) {
       const parsed = JSON.parse(stdout.trim());
@@ -224,7 +229,7 @@ async function scanBluetooth() {
   try {
     const { stdout } = await execAsync(
       `powershell -NoProfile -Command "Get-PnpDevice -Class Ports -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like '*Bluetooth*' -or $_.InstanceId -like '*BTHENUM*' } | Select-Object FriendlyName, InstanceId | ConvertTo-Json -Compress"`,
-      10000
+      BT_PNP_QUERY_TIMEOUT_MS
     );
     if (stdout.trim()) {
       const ports = JSON.parse(stdout.trim());
@@ -375,7 +380,7 @@ async function sendViaComPortPowerShell(comPort, dataBase64) {
       fs.writeFileSync(scriptPath, script, 'utf-8');
       const { stdout } = await execAsync(
         `powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`,
-        SERIAL_BAUD_TIMEOUT
+        SERIAL_BAUD_TIMEOUT_MS
       );
       if (stdout.trim() === 'OK') {
         baudRateCache.set(comPort, baud);
@@ -483,7 +488,7 @@ async function findComPortForMac(macAddress) {
   try {
     const { stdout } = await execAsync(
       `powershell -NoProfile -Command "Get-PnpDevice -Class Ports -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -like '*BTHENUM*' } | Select-Object FriendlyName, InstanceId | ConvertTo-Json -Compress"`,
-      10000
+      BT_PNP_QUERY_TIMEOUT_MS
     );
     if (!stdout.trim()) return null;
     const parsed = JSON.parse(stdout.trim());
@@ -518,7 +523,7 @@ function startHealthCheck() {
         }
       }
     }
-  }, 60000);
+  }, BT_HEALTH_INTERVAL_MS);
 }
 
 function stopHealthCheck() {

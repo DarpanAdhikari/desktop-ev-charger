@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as ipc from '../services/ipc';
+import { TOAST_DURATION_MS } from '../constants';
 
 export function useChargers() {
   const [chargers, setChargers] = useState([]);
@@ -142,7 +143,7 @@ export function useToast() {
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
+    }, TOAST_DURATION_MS);
   }, []);
 
   return { toasts, addToast };

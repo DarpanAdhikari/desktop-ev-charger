@@ -46,8 +46,22 @@ CREATE TABLE IF NOT EXISTS transactions (
   energy_kwh      REAL,
   soc_start       INTEGER,
   soc_end         INTEGER,
+  customer_id     TEXT,
+  customer_name   TEXT,
+  customer_pan    TEXT,
+  customer_address TEXT,
+  customer_vehicle TEXT,
   status          TEXT NOT NULL DEFAULT 'active', -- active | stopped | disconnected
-  synced          INTEGER NOT NULL DEFAULT 0
+  flagged         INTEGER NOT NULL DEFAULT 0,
+  flag_reason     TEXT,
+  billed          INTEGER NOT NULL DEFAULT 0,
+  synced          INTEGER NOT NULL DEFAULT 0,
+  max_power_kw    REAL,
+  avg_power_kw    REAL,
+  last_power_kw   REAL,
+  meter_energy_start_kwh REAL,
+  meter_energy_end_kwh   REAL,
+  server_data     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS bills (
@@ -55,6 +69,11 @@ CREATE TABLE IF NOT EXISTS bills (
   transaction_id    INTEGER NOT NULL REFERENCES transactions(id),
   bill_number       TEXT UNIQUE NOT NULL,   -- prefix + running number
   company_name      TEXT,
+  customer_id       TEXT,
+  customer_name     TEXT,
+  customer_pan      TEXT,
+  customer_address  TEXT,
+  customer_vehicle  TEXT,
   shift_id          INTEGER REFERENCES shifts(id),
   rate_per_kwh      REAL,
   energy_kwh        REAL,
@@ -70,7 +89,13 @@ CREATE TABLE IF NOT EXISTS bills (
   print_success_count INTEGER NOT NULL DEFAULT 0,
   print_fail_count    INTEGER NOT NULL DEFAULT 0,
   synced            INTEGER NOT NULL DEFAULT 0,
-  created_at        TEXT NOT NULL
+  server_bill_id    TEXT,               -- id assigned by the backend on sync
+  created_at        TEXT NOT NULL,
+  max_power_kw      REAL,
+  avg_power_kw      REAL,
+  last_power_kw     REAL,
+  meter_energy_start_kwh REAL,
+  meter_energy_end_kwh   REAL
 );
 
 CREATE TABLE IF NOT EXISTS logs (
@@ -98,3 +123,19 @@ CREATE TABLE IF NOT EXISTS sync_queue (
 CREATE INDEX IF NOT EXISTS idx_logs_charger ON logs(charger_id, ts);
 CREATE INDEX IF NOT EXISTS idx_sync_status ON sync_queue(status);
 CREATE INDEX IF NOT EXISTS idx_tx_charger ON transactions(charger_id, connector_id);
+
+-- Outbound operator commands queued while the WS link is down.
+CREATE TABLE IF NOT EXISTS pending_commands (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  charger_id    TEXT NOT NULL,
+  connector_id  INTEGER NOT NULL,
+  action        TEXT NOT NULL,
+  payload       TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'pending', -- pending | sent
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  last_error    TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_commands(status);

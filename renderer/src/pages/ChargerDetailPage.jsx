@@ -1,11 +1,26 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useChargers, useLiveEvents } from '../hooks/useVoltDesk';
-import { sendAction, getSettings, searchCustomers, listLogs } from '../services/ipc';
+import { useContextMenu } from '../hooks/useContextMenu.jsx';
+import { sendAction, getSettings, searchCustomers, listLogs, listAttention, forceCloseSession, retryBilling } from '../services/ipc';
+import { formatDuration, formatRate, formatCurrency, formatNullable, formatTimeAgo, statusColor } from '../utils';
+import { CMD_RESULT_HIDE_MS, EVENT_LOG_LIMIT, SEARCH_DEBOUNCE_MS } from '../constants';
+import {
+  COMMAND_ACKNOWLEDGED, REMOTE_COMMAND_SENT, COMMAND_ACCEPTED, COMMAND_RESULT,
+  commandSentText, commandQueuedText, commandRejectedText, failedToSendText,
+  sessionClosedToast, sessionNeedsAttentionItem, FORCE_CLOSE_FAILED, FORCE_CLOSE_ERROR,
+  BILLING_RETRY_FAILED, BILLING_RETRY_ERROR, billGeneratedText, billEventDetailText,
+  connectorChargeCompleteText, connectorFaultText, attentionMessage,
+  ATTENTION_HEADING, ATTENTION_BANNER_TITLE, FORCE_CLOSE_LABEL, FORCE_CLOSE_TITLE,
+  CLOSE_SESSION_LABEL, CLOSING_LABEL, CANCEL_LABEL, RETRY_BILLING_LABEL,
+  ATTENTION_MODAL_COPY, SENDING_LABEL, SELECT_CUSTOMER_FIRST, START_LABEL, STOP_LABEL,
+  START_CHARGING, STOP_CHARGING, NO_ACTIONS_AVAILABLE, CHARGER_NOT_FOUND,
+} from '../strings';
 
 export default function ChargerDetailPage({ addToast, offlineConnectors }) {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { openMenu } = useContextMenu();
   const { chargers, loading, refresh } = useChargers();
   const [acting, setActing] = useState(null);
   const [cmdResults, setCmdResults] = useState({});
@@ -17,6 +32,9 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
   const [customerSearchEndpoint, setCustomerSearchEndpoint] = useState('');
   const searchTimer = useRef(null);
   const [eventLog, setEventLog] = useState([]);
+  const [attention, setAttention] = useState([]);
+  const [confirmClose, setConfirmClose] = useState(null);
+  const [closing, setClosing] = useState(false);
 
   useLiveEvents({
     onChargerEvent: (evt) => {
@@ -24,24 +42,25 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
         const key = `${evt.connector_id}_${evt.command}`;
         const ok = evt.status === 'Accepted' || evt.status === 'received';
         setCmdResults((prev) => ({ ...prev, [key]: { command: evt.command, status: evt.status, reason: evt.reason, ok, ts: Date.now() } }));
-        if (evt.status === 'Accepted') addToast(`${evt.command} Accepted for charger ${evt.charger_id} connector ${evt.connector_id}`, 'success');
-        else if (evt.reason) addToast(`${evt.command} rejected: ${evt.reason}`, 'error');
-        else addToast(`${evt.command} result: ${evt.status}`, 'info');
+        if (evt.status === 'Accepted') addToast(COMMAND_ACCEPTED(evt.command, evt.charger_id, evt.connector_id), 'success');
+        else if (evt.reason) addToast(commandRejectedText(evt.command, evt.reason), 'error');
+        else addToast(COMMAND_RESULT(evt.command, evt.status), 'info');
         clearTimeout(cmdTimers.current[key]);
         cmdTimers.current[key] = setTimeout(() => {
           setCmdResults((prev) => { const n = { ...prev }; delete n[key]; return n; });
-        }, 8000);
+        }, CMD_RESULT_HIDE_MS);
       }
       if (evt.type === 'command_ack') {
-        addToast(`${evt.command} acknowledged by server`, 'info');
+        addToast(COMMAND_ACKNOWLEDGED(evt.command), 'info');
       }
       if (evt.type === 'command_sent') {
-        addToast(`Remote ${evt.command} sent to charger`, 'info');
+        addToast(REMOTE_COMMAND_SENT(evt.command), 'info');
       }
       if (evt.charger_id === id) {
-        setEventLog((prev) => [{ ts: new Date().toISOString(), type: evt.type, payload: evt }, ...prev].slice(0, 20));
+        setEventLog((prev) => [{ ts: new Date().toISOString(), type: evt.type, payload: evt }, ...prev].slice(0, EVENT_LOG_LIMIT));
       }
       refresh();
+      loadAttention();
     }
   });
 
@@ -57,7 +76,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
       const results = await searchCustomers(searchQuery.trim());
       setSearchResults(results || []);
       setSearching(false);
-    }, 300);
+    }, SEARCH_DEBOUNCE_MS);
     return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
   }, [searchQuery]);
 
@@ -65,12 +84,21 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
     let mounted = true;
     (async () => {
       try {
-        const { rows } = await listLogs({ chargerId: id, limit: 20 });
-        if (mounted) setEventLog((rows || []).reverse().map((r) => ({ ts: r.ts || r.created_at, type: r.type, payload: r.payload ? (typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload) : {} })).slice(0, 20));
+        const { rows } = await listLogs({ chargerId: id, limit: EVENT_LOG_LIMIT });
+        if (mounted) setEventLog((rows || []).reverse().map((r) => ({ ts: r.ts || r.created_at, type: r.type, payload: r.payload ? (typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload) : {} })).slice(0, EVENT_LOG_LIMIT));
       } catch {}
     })();
     return () => { mounted = false; };
   }, [id]);
+
+  const loadAttention = useCallback(async () => {
+    try {
+      const items = await listAttention();
+      setAttention((items || []).filter((t) => t.charger_id === id));
+    } catch {}
+  }, [id]);
+
+  useEffect(() => { loadAttention(); }, [loadAttention]);
 
   const charger = chargers.find((c) => c.id === id);
 
@@ -88,15 +116,52 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
       }
       const result = await sendAction(payload);
       if (result.sent) {
-        addToast(`${action} command sent to ${id} connector ${connectorId}`, 'info');
+        addToast(commandSentText(action, id, connectorId), 'info');
+      } else if (result.queued) {
+        addToast(commandQueuedText(action), 'info');
       } else {
-        addToast(`${action} rejected: ${result.reason}`, 'error');
+        addToast(commandRejectedText(action, result.reason), 'error');
       }
     } catch (e) {
-      addToast(`Failed to send ${action}: ${e.message}`, 'error');
+      addToast(failedToSendText(action, e.message), 'error');
     } finally {
       setActing(null);
       refresh();
+    }
+  };
+
+  const handleForceClose = async (tx) => {
+    setClosing(true);
+    try {
+      const result = await forceCloseSession(tx.id);
+      if (result.success) {
+        addToast(sessionClosedToast(tx), 'success');
+      } else {
+        addToast(FORCE_CLOSE_FAILED(result.reason), 'error');
+      }
+    } catch (e) {
+      addToast(FORCE_CLOSE_ERROR(e.message), 'error');
+    } finally {
+      setClosing(false);
+      setConfirmClose(null);
+      refresh();
+      loadAttention();
+    }
+  };
+
+  const handleRetryBilling = async (tx) => {
+    try {
+      const result = await retryBilling(tx.id);
+      if (result.success) {
+        addToast(billGeneratedText(result.bill), 'success');
+      } else {
+        addToast(BILLING_RETRY_FAILED(result.reason), 'error');
+      }
+    } catch (e) {
+      addToast(BILLING_RETRY_ERROR(e.message), 'error');
+    } finally {
+      refresh();
+      loadAttention();
     }
   };
 
@@ -108,7 +173,38 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
           <div className="skeleton" style={{ width: 200, height: 28, marginBottom: 8 }} />
           <div className="skeleton" style={{ width: 140, height: 16 }} />
         </div>
-        <div className="connector-grid">
+      {attention.length > 0 && (
+        <div className="attention-list">
+          <h2 className="attention-heading">{ATTENTION_HEADING}</h2>
+          {attention.map((tx) => (
+            <div key={tx.id} className="attention-item">
+              <div className="attention-info">
+                <strong>Connector {tx.connector_id}</strong>
+                <span className="attention-reason">
+                  {sessionNeedsAttentionItem(tx)}
+                </span>
+                {tx.energy_kwh != null && (
+                  <span className="attention-meta">{(tx.energy_kwh || 0).toFixed(2)} kWh{tx.started_at ? ` \u00B7 started ${new Date(tx.started_at).toLocaleString()}` : ''}</span>
+                )}
+              </div>
+              <div className="attention-actions">
+                {tx.status === 'active' && (
+                  <button className="btn danger" onClick={() => setConfirmClose(tx)}>
+                    {FORCE_CLOSE_LABEL}
+                  </button>
+                )}
+                {tx.status === 'stopped' && !tx.billed && (
+                  <button className="btn ghost" onClick={() => handleRetryBilling(tx)}>
+                    {RETRY_BILLING_LABEL}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="connector-grid">
           {[1,2].map((i) => (
             <div key={i} className="connector-card" style={{ padding: 16 }}>
               <div className="skeleton" style={{ width: '60%', height: 16, marginBottom: 8 }} />
@@ -125,7 +221,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
     return (
       <>
         <button className="back-btn" onClick={() => navigate('/chargers')}>Back to Chargers</button>
-        <div className="empty-state"><p>Charger not found.</p></div>
+        <div className="empty-state"><p>{CHARGER_NOT_FOUND}</p></div>
       </>
     );
   }
@@ -210,14 +306,29 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
           const tariffLabel = meter?.rate_per_kwh != null ? `$${Number(meter.rate_per_kwh).toFixed(2)}/kWh` : null;
           const sc = statusColor(liveStatus);
           const showMeterData = activeTx || meter;
+          const powerNow = meterValues.power ?? meter?.power_kw;
+          const powerDeltaKw = meter?.power_delta_kw ?? delta.power ?? null;
+          const powerLabel = powerNow != null
+            ? powerDeltaKw != null && Math.abs(powerDeltaKw) >= 0.005
+              ? `${Number(powerNow).toFixed(2)} kW (\u0394 ${powerDeltaKw > 0 ? '+' : ''}${Number(powerDeltaKw).toFixed(2)})`
+              : formatNullable(powerNow, 'kW')
+            : '-';
           const hasLiveData = Number(meterValues.power ?? meter?.power_kw) > 0 || meterValues.voltage != null || meterValues.current != null || meter?.soc != null;
-          const hasProgress = delta.soc != null || delta.energy != null || rateLabel || meter?.eta_minutes != null || (session.soc_start != null && session.soc_end != null);
+          const hasProgress = delta.soc != null || delta.energy != null || delta.power != null || rateLabel || meter?.eta_minutes != null || (session.soc_start != null && session.soc_end != null);
 
           const offlineKey = `${con.charger_id || id}:${con.connector_id}`;
           const isOffline = !!offlineConnectors?.[offlineKey];
 
+          const openConnectorMenu = (e) => {
+            const items = [];
+            if (canStart) items.push({ label: START_CHARGING, run: () => handleAction(con.connector_id, 'START') });
+            if (canStop) items.push({ label: STOP_CHARGING, danger: true, run: () => handleAction(con.connector_id, 'STOP') });
+            if (items.length === 0) items.push({ label: NO_ACTIONS_AVAILABLE, disabled: true });
+            openMenu(e, items);
+          };
+
           return (
-            <div key={con.connector_id} className={`connector-card ${isOffline ? 'offline' : liveStatus}`}>
+            <div key={con.connector_id} className={`connector-card ${isOffline ? 'offline' : liveStatus}`} onContextMenu={openConnectorMenu}>
               <div className="connector-header">
                 <div className="battery-wrap">
                   <BatterySvg percent={Math.min(Math.max(Number(soc) || 0, 0), 100)} isCharging={isCharging && !isOffline} />
@@ -240,6 +351,12 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
 
               {showMeterData && (
                 <div className="connector-sections">
+                  {activeTx?.flagged && (
+                    <div className="attention-banner">
+                      <span className="attention-banner-title">{ATTENTION_BANNER_TITLE}</span>
+                      <span>{attentionMessage(activeTx.flag_reason)}</span>
+                    </div>
+                  )}
                   <div className="connector-section-group">
                     <div className="section-group-label">Session</div>
                     <div className="section-group-metrics">
@@ -253,7 +370,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
                     <div className="connector-section-group">
                       <div className="section-group-label">Live</div>
                       <div className="section-group-metrics">
-                        <Metric icon={<IconBolt />} label="Power" value={formatNullable(meterValues.power ?? meter?.power_kw, 'kW')} valueClass="amber" />
+                        <Metric icon={<IconBolt />} label="Power" value={powerLabel} valueClass="amber" />
                         <Metric icon={<IconWave />} label="Voltage" value={formatNullable(meterValues.voltage, 'V')} />
                         <Metric icon={<IconCurrent />} label="Current" value={formatNullable(meterValues.current, 'A')} />
                         {meter?.soc != null && <Metric icon={<IconBattery />} label="SoC" value={`${Math.round(meter.soc)}%`} />}
@@ -267,6 +384,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
                       <div className="section-group-metrics">
                         {delta.soc != null && <Metric icon={<IconTrendUp />} label="SoC \u0394" value={formatNullable(delta.soc, '%')} />}
                         {delta.energy != null && <Metric icon={<IconTrendUp />} label="Energy \u0394" value={formatNullable(delta.energy, 'kWh')} />}
+                        {powerDeltaKw != null && <Metric icon={<IconTrendUp />} label="Power \u0394" value={formatNullable(powerDeltaKw, 'kW')} />}
                         {session.soc_start != null && session.soc_end != null && (
                           <span className="connector-metric" style={{ color: 'var(--text-secondary)', fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
                             Session: {session.soc_start}% \u2192 {session.soc_end}%
@@ -299,13 +417,19 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
               )}
 
               <div className="connector-actions">
+                {activeTx?.flagged && (
+                  <button className="btn danger" disabled={acting !== null}
+                    onClick={() => setConfirmClose(activeTx)}>
+                    {FORCE_CLOSE_LABEL}
+                  </button>
+                )}
                 {canStart && (
                   <button
                     className="btn primary"
                     disabled={acting === `${con.connector_id}_START` || (!!customerSearchEndpoint && !customer)}
                     onClick={() => handleAction(con.connector_id, 'START')}
                   >
-                    {acting === `${con.connector_id}_START` ? 'Sending...' : customerSearchEndpoint && !customer ? 'Select customer first' : 'Start'}
+                    {acting === `${con.connector_id}_START` ? SENDING_LABEL : customerSearchEndpoint && !customer ? SELECT_CUSTOMER_FIRST : START_LABEL}
                   </button>
                 )}
                 {canStop && (
@@ -314,11 +438,11 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
                     disabled={acting === `${con.connector_id}_STOP`}
                     onClick={() => handleAction(con.connector_id, 'STOP')}
                   >
-                    {acting === `${con.connector_id}_STOP` ? 'Sending...' : 'Stop'}
+                    {acting === `${con.connector_id}_STOP` ? SENDING_LABEL : STOP_LABEL}
                   </button>
                 )}
                 {!canStart && !canStop && (
-                  <button className="btn ghost" disabled>Start</button>
+                  <button className="btn ghost" disabled>{START_LABEL}</button>
                 )}
               </div>
               {(() => {
@@ -361,6 +485,27 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
           </div>
         </div>
       )}
+
+      {confirmClose && (
+        <div className="modal-backdrop open" onClick={() => !closing && setConfirmClose(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>{FORCE_CLOSE_TITLE}</h2>
+            <p className="muted">
+              {ATTENTION_MODAL_COPY}
+            </p>
+            <p className="muted">
+              Connector {confirmClose.connector_id} \u00B7 Session {confirmClose.ocpp_tx_id || confirmClose.id}{' '}
+              \u00B7 {confirmClose.energy_kwh != null ? `${(confirmClose.energy_kwh || 0).toFixed(2)} kWh` : 'energy unknown'}
+            </p>
+            <div className="modal-actions">
+              <button className="btn danger" disabled={closing} onClick={() => handleForceClose(confirmClose)}>
+                {closing ? CLOSING_LABEL : CLOSE_SESSION_LABEL}
+              </button>
+              <button className="btn ghost" disabled={closing} onClick={() => setConfirmClose(null)}>{CANCEL_LABEL}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -380,13 +525,13 @@ function eventDetail(e) {
     return `Connector ${p.connector_id}: ${from} \u2192 ${to}${p.error ? ` (${p.error})` : ''}`;
   }
   if (e.type === 'charge_complete') {
-    return `Connector ${p.connector_id} finished charging`;
+    return connectorChargeCompleteText(p.connector_id);
   }
   if (e.type === 'fault_alert') {
-    return `Connector ${p.connector_id} fault${p.error ? ': ' + p.error : ''}`;
+    return connectorFaultText(p.connector_id, p.error);
   }
   if (e.type === 'bill_generated') {
-    return `Bill #${p.bill?.bill_number || ''} generated ($${(p.bill?.total || 0).toFixed(2)})`;
+    return billEventDetailText(p);
   }
   if (e.type === 'transaction_started') {
     return `Tx ${p.transaction_id} started on connector ${p.connector_id}`;
@@ -464,52 +609,3 @@ function BatterySvg({ percent, isCharging }) {
   );
 }
 
-function statusColor(status) {
-  switch ((status || '').toLowerCase()) {
-    case 'charging': return 'var(--amber)';
-    case 'available': return 'var(--teal)';
-    case 'faulted':
-    case 'error': return 'var(--red)';
-    case 'preparing':
-    case 'finishing': return 'var(--blue)';
-    default: return 'var(--slate)';
-  }
-}
-
-function formatDuration(sec) {
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
-
-function formatRate(value, unit) {
-  const num = Number(value);
-  if (!Number.isFinite(num) || num <= 0) return null;
-  return `${num.toFixed(unit === 'kW' ? 1 : 2)} ${unit}`;
-}
-
-function formatNullable(value, unit) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return '-';
-  const precision = unit === '%' ? 0 : 2;
-  return `${num.toFixed(precision)} ${unit}`;
-}
-
-function formatCurrency(value) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return null;
-  return `$${num.toFixed(2)}`;
-}
-
-function formatTimeAgo(ts) {
-  const diff = Date.now() - ts;
-  const sec = Math.floor(diff / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
-}

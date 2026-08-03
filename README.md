@@ -39,19 +39,28 @@ Paper width (80mm / 58mm / custom) is configurable per printer type. Test print
 uses raw ESC/POS text commands (init, alignment, line feeds, cut) for crisp
 printer-native font rendering at 203 DPI.
 
+## Backend sync
+
+The app talks to your backend over the REST contract documented in
+[`docs/backend-api.md`](docs/backend-api.md): it ingests bills/logs/transactions
+from a local outbox, and reads company info, customer search, the optional
+"Custom" bill format, bill details, and server-assigned invoice numbers.
+
+A dependency-free **reference backend** implements that contract and can run
+as-is to connect the app end-to-end — see
+[`reference-server/`](reference-server/README.md) (`node server.js`) and the
+step-by-step wiring in [`docs/BACKEND_SETUP.md`](docs/BACKEND_SETUP.md).
+`reference-server/conformance-check.js` verifies any server against all 13
+contract assertions.
+
 ## What still needs you
 
-1. **Backend API contract.** `syncWorker.js` POSTs each queued bill/log/transaction
-   as JSON to `api_base_url + <entity endpoint path>`. Once you share the actual
-   docs for those endpoints (auth scheme, payload shape, response codes), I'll
-   adjust the worker to match exactly — right now it assumes a simple
-   `Authorization: Bearer <api_key>` + `200 OK` contract.
-2. **Predicted finish time.** The CSMS already streams SoC in `meter` events.
+1. **Predicted finish time.** The CSMS already streams SoC in `meter` events.
    The renderer has a placeholder (`estimateEta`) — next step is to track a
    rolling SoC-per-minute rate per active transaction in the main process (or
-   push it down from the Python side) and stream it through so the charger
+   push it down from the server side) and stream it through so the charger
    cards can show a real ETA.
-3. **Shift-spanning sessions.** Currently a bill is priced entirely at the shift
+2. **Shift-spanning sessions.** Currently a bill is priced entirely at the shift
    active when the session *started*. If you want a session that crosses a
    shift boundary to be split and priced proportionally, say so and I'll adjust
    `billing.js`.
@@ -70,13 +79,17 @@ main/
   services/
     wsClient.js          persistent CSMS connection, event → SQLite mirroring
     billing.js           shift lookup + bill generation
-    billTemplate.js      HTML invoice for thermal_80mm / A4
+    billTemplate.js      HTML invoice (professional / enhanced / original / custom)
     printService.js       system printer (webContents.print) + success/fail counters
     escposPrinter.js     ESC/POS rendering: HTML→bitmap capture, raster encoding,
                          raw test payload generation, network socket + Bluetooth send
     bluetoothPrinter.js  Bluetooth discovery, daemon manager, COM port fallback,
                          baud rate detection, startup reconnect
     syncWorker.js        outbox drain to backend API
+    apiAuth.js           login/token flow, 401 re-auth
+    billNumber.js        server-assigned bill number pre-fetch
+reference-server/        runnable reference backend + conformance check
+docs/                    backend-api.md (contract) + BACKEND_SETUP.md (wiring)
 renderer/
   src/                   React app (Vite + React Router)
     pages/               Settings, Chargers, Bills, Logs views

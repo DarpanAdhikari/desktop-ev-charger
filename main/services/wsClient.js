@@ -1,8 +1,8 @@
 const WebSocket = require('ws');
 const db = require('../db/db');
 const { generateBillForTransaction, findShiftForTime } = require('./billing');
-
-const RECONNECT_DELAY_MS = 3000;
+const recovery = require('./recovery');
+const { RECONNECT_DELAY_MS } = require('../constants');
 
 class CsmsClient {
   constructor(onEvent, options = {}) {
@@ -89,9 +89,10 @@ class CsmsClient {
     const now = new Date().toISOString();
     const chargerId = evt.charger_id;
 
-    // Meter values are high-frequency live state. Keep them out of local storage
-    // until the server includes both SoC endpoints needed for a useful session record.
-    const shouldPersistEvent = evt.type !== 'meter' || hasSessionSocBounds(evt.session);
+    // Keep every server-side event for audit: full raw payloads land in logs
+    // and are queued for sync. Only heartbeats are skipped - they carry no
+    // payload and their liveness info is already tracked in the chargers table.
+    const shouldPersistEvent = evt.type !== 'heartbeat';
     if (chargerId && shouldPersistEvent) {
       const info = raw
         .prepare(
@@ -120,6 +121,7 @@ class CsmsClient {
 
       case 'snapshot':
         this._handleSnapshot(evt, now);
+        recovery.reconcileFromSnapshot(evt);
         break;
 
       case 'heartbeat':
@@ -156,12 +158,13 @@ class CsmsClient {
         raw
           .prepare(
             `INSERT INTO transactions (charger_id, connector_id, ocpp_tx_id, started_at, status,
-              customer_id, customer_name, customer_pan, customer_address, customer_vehicle)
+              customer_id, customer_name, customer_pan, customer_address, customer_vehicle, server_data)
              VALUES (?, ?, ?, ?, 'active',
-              ?, ?, ?, ?, ?)`
+              ?, ?, ?, ?, ?, ?)`
           )
           .run(chargerId, evt.connector_id, evt.transaction_id, now,
-            customerId, customerName, customerPan, customerAddress, customerVehicle);
+            customerId, customerName, customerPan, customerAddress, customerVehicle,
+            JSON.stringify(evt));
         break;
       }
 
@@ -192,13 +195,29 @@ class CsmsClient {
           const prev = this._meterCache.get(key);
           const meterTs = meter.timestamp ? new Date(meter.timestamp).getTime() : Date.now();
           let ratePerMin = prev ? prev.ratePerMin : 0;
-          if (meterSoc != null && prev && prev.lastSoc != null && meterSoc !== prev.lastSoc) {
+          if (powerKw === 0) {
+            // Honest idle state: no energy is being delivered, so the rate drops to 0.
+            ratePerMin = 0;
+          } else if (meterSoc != null && prev && prev.lastSoc != null && meterSoc !== prev.lastSoc) {
             const elapsedMs = meterTs - prev.lastTs;
             if (elapsedMs > 0) {
               ratePerMin = ((meterSoc - prev.lastSoc) / elapsedMs) * 60000;
             }
           }
-          const rateKw = powerKw != null && powerKw > 0 ? powerKw : prev ? prev.rateKw : null;
+          // Current power is the raw reading, including 0. Only fall back when the
+          // reading is missing entirely (e.g. a snapshot-restored cache).
+          const rateKw = powerKw != null ? powerKw : prev ? prev.rateKw : null;
+          const powerPrevKw = prev && prev.lastPowerKw != null ? prev.lastPowerKw : null;
+          const serverDelta = evt.delta || null;
+          const powerDeltaKw = toFiniteNumber(serverDelta && serverDelta.power) ??
+            (powerKw != null && powerPrevKw != null ? powerKw - powerPrevKw : null);
+          // Running session power stats (max/avg/last) for the receipt.
+          const maxPowerKw = powerKw != null
+            ? Math.max(powerKw, prev && prev.maxPowerKw != null ? prev.maxPowerKw : 0)
+            : (prev ? prev.maxPowerKw : null);
+          const powerCount = (prev ? prev.powerCount : 0) + (powerKw != null ? 1 : 0);
+          const powerSumKw = (prev ? prev.powerSumKw : 0) + (powerKw != null ? powerKw : 0);
+          const avgPowerKw = powerCount > 0 ? powerSumKw / powerCount : null;
           const estimatedCapacity = estimateBatteryCapacityKwh(session) || this.defaultBatteryCapacityKwh;
           const etaMinutes = this.chargingRateMode === 'kw'
             ? estimateEtaFromKw({ soc: meterSoc, powerKw: rateKw, capacityKwh: estimatedCapacity })
@@ -207,6 +226,8 @@ class CsmsClient {
           const sessionElapsed = toFiniteNumber(session.elapsed_sec);
           const sessionSocStart = toFiniteNumber(session.soc_start);
           const sessionSocEnd = toFiniteNumber(session.soc_end);
+          const meterEnergy = toFiniteNumber(meter.energy);
+          const energyDeltaKwh = toFiniteNumber(serverDelta && serverDelta.energy);
           const livePricing = calculateLivePricing(sessionEnergy);
           if (sessionSocStart != null && sessionSocEnd != null) {
             raw
@@ -215,7 +236,10 @@ class CsmsClient {
                    energy_kwh=COALESCE(?, energy_kwh),
                    soc_start=COALESCE(soc_start, ?),
                    soc_end=COALESCE(?, soc_end),
-                   duration_sec=COALESCE(?, duration_sec)
+                   duration_sec=COALESCE(?, duration_sec),
+                   max_power_kw=?,
+                   avg_power_kw=?,
+                   last_power_kw=?
                  WHERE id = (
                    SELECT id FROM transactions
                    WHERE charger_id = ? AND connector_id = ? AND status = 'active'
@@ -227,22 +251,70 @@ class CsmsClient {
                 sessionSocStart,
                 sessionSocEnd,
                 sessionElapsed,
+                maxPowerKw,
+                avgPowerKw != null ? Math.round(avgPowerKw * 100) / 100 : null,
+                powerKw,
                 chargerId,
                 evt.connector_id
               );
           }
+          if (meterEnergy != null) {
+            // Cumulative meter counter at session start and end: the counter when
+            // the session began is invariant during the session and equals
+            // meter.energy - session.energy, so end - start == delivered kWh.
+            const meterStartEnergy = sessionEnergy != null ? meterEnergy - sessionEnergy : null;
+            raw
+              .prepare(
+                `UPDATE transactions SET
+                   meter_energy_start_kwh=CASE WHEN meter_energy_start_kwh IS NULL THEN ? ELSE meter_energy_start_kwh END,
+                   meter_energy_end_kwh=?
+                 WHERE id = (
+                   SELECT id FROM transactions
+                   WHERE charger_id = ? AND connector_id = ? AND status = 'active'
+                   ORDER BY id DESC LIMIT 1
+                 )`
+              )
+              .run(
+                meterStartEnergy,
+                meterEnergy,
+                chargerId,
+                evt.connector_id
+              );
+          }
+          // Keep the full server payload with the session so no field is lost.
+          raw
+            .prepare(
+              `UPDATE transactions SET server_data = ?
+               WHERE id = (
+                 SELECT id FROM transactions
+                 WHERE charger_id = ? AND connector_id = ? AND status = 'active'
+                 ORDER BY id DESC LIMIT 1
+               )`
+            )
+            .run(JSON.stringify(evt), chargerId, evt.connector_id);
           const snapshot = {
             lastTs: meterTs,
             lastSoc: meterSoc,
+            lastPowerKw: powerKw,
+            maxPowerKw,
+            powerSumKw,
+            powerCount,
             meter,
-            delta: evt.delta || null,
+            delta: serverDelta,
             session,
             ratePerMin,
             rate_per_min: ratePerMin > 0 ? Math.round(ratePerMin * 100) / 100 : 0,
             rateKw,
             rate_kw: rateKw != null ? Math.round(rateKw * 100) / 100 : null,
             power_kw: powerKw,
-            energy_kwh: sessionEnergy ?? toFiniteNumber(meter.energy),
+            power_prev_kw: powerPrevKw,
+            power_delta_kw: powerDeltaKw != null ? Math.round(powerDeltaKw * 100) / 100 : null,
+            max_power_kw: maxPowerKw != null ? Math.round(maxPowerKw * 100) / 100 : null,
+            avg_power_kw: avgPowerKw != null ? Math.round(avgPowerKw * 100) / 100 : null,
+            last_power_kw: powerKw,
+            energy_kwh: sessionEnergy,
+            meter_energy_kwh: meterEnergy,
+            energy_delta_kwh: energyDeltaKwh != null ? Math.round(energyDeltaKwh * 100) / 100 : null,
             eta_minutes: etaMinutes,
             soc: meterSoc,
             charging_rate_mode: this.chargingRateMode,
@@ -252,12 +324,19 @@ class CsmsClient {
           this._meterCache.set(key, snapshot);
           if (etaMinutes != null || ratePerMin > 0 || rateKw != null) {
             this.onEvent({
-          type: 'meter_eta',
+              type: 'meter_eta',
               charger_id: chargerId,
               connector_id: evt.connector_id,
               soc: meterSoc,
               rate_per_min: ratePerMin > 0 ? Math.round(ratePerMin * 100) / 100 : 0,
               rate_kw: rateKw != null ? Math.round(rateKw * 100) / 100 : null,
+              power_kw: powerKw,
+              power_prev_kw: powerPrevKw,
+              power_delta_kw: powerDeltaKw != null ? Math.round(powerDeltaKw * 100) / 100 : null,
+              max_power_kw: maxPowerKw != null ? Math.round(maxPowerKw * 100) / 100 : null,
+              avg_power_kw: avgPowerKw != null ? Math.round(avgPowerKw * 100) / 100 : null,
+              last_power_kw: powerKw,
+              energy_kwh: sessionEnergy,
               eta_minutes: etaMinutes,
               charging_rate_mode: this.chargingRateMode,
               estimated_capacity_kwh: estimatedCapacity != null ? Math.round(estimatedCapacity * 100) / 100 : null,
@@ -280,30 +359,52 @@ class CsmsClient {
           .get(chargerId, evt.transaction_id);
         if (tx) {
           const summary = evt.summary || {};
+          // The server names these started_at/ended_at but actually sends the SoC
+          // at start/end (values are 0-100). Guard with a sanity check so a future
+          // server change to real timestamps degrades to the safe missing_soc path.
           const summarySocStart = toFiniteNumber(summary.started_at);
           const summarySocEnd = toFiniteNumber(summary.ended_at);
-          if (summarySocStart == null || summarySocEnd == null) {
-            raw.prepare('DELETE FROM transactions WHERE id = ?').run(tx.id);
-            break;
-          }
+          const hasSoc = summarySocStart != null && summarySocEnd != null &&
+            summarySocStart <= 100 && summarySocEnd <= 100;
+          const durationSec = toFiniteNumber(summary.duration_sec);
+          // The server sends no absolute end time; the session duration is the
+          // only trustworthy value, so derive the end time from the real start.
+          const stoppedAt = durationSec != null && tx.started_at
+            ? new Date(new Date(tx.started_at).getTime() + durationSec * 1000).toISOString()
+            : now;
+          const finalizeSql = hasSoc
+            ? `UPDATE transactions SET stopped_at=?, duration_sec=?, energy_kwh=?,
+                 soc_start=?, soc_end=?, status='stopped', flagged=0, flag_reason=NULL WHERE id=?`
+            : `UPDATE transactions SET stopped_at=?, duration_sec=?, energy_kwh=?,
+                 status='stopped', flagged=1, flag_reason='missing_soc' WHERE id=?`;
           raw
-            .prepare(
-              `UPDATE transactions SET stopped_at=?, duration_sec=?, energy_kwh=?,
-                 soc_start=?, soc_end=?, status='stopped' WHERE id=?`
-            )
+            .prepare(finalizeSql)
             .run(
-              now,
-              summary.duration_sec ?? null,
+              stoppedAt,
+              durationSec,
               summary.energy_kwh ?? null,
-              summarySocStart,
-              summarySocEnd,
+              ...(hasSoc ? [summarySocStart, summarySocEnd] : []),
               tx.id
             );
+          // Keep the meter range self-consistent: end - start must equal the
+          // billed energy even if the final meter readings were missed.
+          const billedEnergy = toFiniteNumber(summary.energy_kwh);
+          const meterStartKwh = toFiniteNumber(tx.meter_energy_start_kwh);
+          if (meterStartKwh != null && billedEnergy != null) {
+            raw
+              .prepare('UPDATE transactions SET meter_energy_end_kwh = ? WHERE id = ?')
+              .run(meterStartKwh + billedEnergy, tx.id);
+          }
+          // Keep the full stopped payload (summary etc.) with the session.
+          raw.prepare('UPDATE transactions SET server_data = ? WHERE id = ?')
+            .run(JSON.stringify(evt), tx.id);
           try {
             const bill = generateBillForTransaction(tx.id);
+            raw.prepare('UPDATE transactions SET billed = 1 WHERE id = ?').run(tx.id);
+            recovery.queueTransactionSync(tx.id);
             this.onEvent({ type: 'bill_generated', bill, charger_id: chargerId });
           } catch (e) {
-            this.onEvent({ type: 'bill_error', error: String(e), charger_id: chargerId });
+            this.onEvent({ type: 'bill_error', error: String(e), charger_id: chargerId, tx_id: tx.id });
           }
         }
         break;
@@ -348,15 +449,34 @@ class CsmsClient {
         const energy = toFiniteNumber(tx.energy_kwh);
         const elapsed = toFiniteNumber(tx.elapsed_sec);
         const livePricing = calculateLivePricing(energy);
+        // Keep running power stats if this connector already had a live session
+        // (snapshots arrive periodically and must not reset the receipt stats).
+        const prevCache = this._meterCache.get(`${chargerId}:${connectorId}`);
+        const maxPowerKw = prevCache && prevCache.maxPowerKw != null ? prevCache.maxPowerKw : null;
+        const powerSumKw = prevCache && prevCache.powerSumKw != null ? prevCache.powerSumKw : 0;
+        const powerCount = prevCache && prevCache.powerCount != null ? prevCache.powerCount : 0;
+        const lastPowerKw = prevCache && prevCache.lastPowerKw != null ? prevCache.lastPowerKw : null;
+        const avgPowerKw = powerCount > 0 ? powerSumKw / powerCount : null;
         this._meterCache.set(`${chargerId}:${connectorId}`, {
           lastTs: Date.now(),
           lastSoc: socEnd,
+          lastPowerKw,
+          maxPowerKw,
+          powerSumKw,
+          powerCount,
           ratePerMin: 0,
           rate_per_min: 0,
           rateKw: null,
           rate_kw: null,
-          power_kw: null,
+          power_kw: lastPowerKw,
+          power_prev_kw: null,
+          power_delta_kw: null,
+          max_power_kw: maxPowerKw != null ? Math.round(maxPowerKw * 100) / 100 : null,
+          avg_power_kw: avgPowerKw != null ? Math.round(avgPowerKw * 100) / 100 : null,
+          last_power_kw: lastPowerKw,
           energy_kwh: energy,
+          meter_energy_kwh: null,
+          energy_delta_kwh: null,
           eta_minutes: null,
           soc: socEnd,
           charging_rate_mode: this.chargingRateMode,
@@ -377,17 +497,22 @@ class CsmsClient {
           if (existing) {
             raw
               .prepare(
-                `UPDATE transactions SET duration_sec=?, energy_kwh=?, soc_start=?, soc_end=? WHERE id=?`
+                `UPDATE transactions SET duration_sec=?, energy_kwh=?, soc_start=?, soc_end=?, server_data=? WHERE id=?`
               )
-              .run(elapsed, energy, socStart, socEnd, existing.id);
+              .run(elapsed, energy, socStart, socEnd, JSON.stringify(evt), existing.id);
           } else {
+            // The server sends no absolute start time; the snapshot's elapsed_sec
+            // is the only trustworthy value, so backdate the start by it.
+            const startedAt = elapsed != null
+              ? new Date(Date.parse(now) - elapsed * 1000).toISOString()
+              : now;
             raw
               .prepare(
                 `INSERT INTO transactions (charger_id, connector_id, ocpp_tx_id, started_at, duration_sec,
-                   energy_kwh, soc_start, soc_end, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`
+                   energy_kwh, soc_start, soc_end, status, server_data)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
               )
-              .run(chargerId, connectorId, tx.transaction_id ?? null, now, elapsed, energy, socStart, socEnd);
+              .run(chargerId, connectorId, tx.transaction_id ?? null, startedAt, elapsed, energy, socStart, socEnd, JSON.stringify(evt));
           }
         }
       }
@@ -398,11 +523,6 @@ class CsmsClient {
 function toFiniteNumber(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
-}
-
-function hasSessionSocBounds(session) {
-  if (!session) return false;
-  return toFiniteNumber(session.soc_start) != null && toFiniteNumber(session.soc_end) != null;
 }
 
 function normalizeStatus(status) {

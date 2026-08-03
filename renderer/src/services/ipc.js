@@ -8,6 +8,34 @@ export function setSettings(patch) {
   return api.setSettings(patch);
 }
 
+export function verifyPassword(password) {
+  return api.verifyPassword(password);
+}
+
+export function clipboardCopy() {
+  return api.clipboardCopy();
+}
+
+export function clipboardPaste() {
+  return api.clipboardPaste();
+}
+
+export function clipboardCut() {
+  return api.clipboardCut();
+}
+
+export function clipboardSelectAll() {
+  return api.clipboardSelectAll();
+}
+
+export function shareSaveImage(opts) {
+  return api.shareSaveImage(opts);
+}
+
+export function shareReveal(filePath) {
+  return api.shareReveal(filePath);
+}
+
 export function getConnectionStatus() {
   return api.getConnectionStatus();
 }
@@ -56,16 +84,24 @@ export function sendAction(payload) {
   return api.sendAction(payload);
 }
 
+export function forceCloseSession(txId) {
+  return api.forceCloseSession(txId);
+}
+
+export function retryBilling(txId) {
+  return api.retryBilling(txId);
+}
+
+export function listAttention() {
+  return api.listAttention();
+}
+
 export function onEvent(callback) {
   return api.onEvent(callback);
 }
 
 export function listPrinters() {
   return api.listPrinters();
-}
-
-export function listComPorts() {
-  return api.listComPorts();
 }
 
 export function testPrinter(opts) {
@@ -94,6 +130,10 @@ export function exportCsv(opts) {
   return api.exportCsv(opts);
 }
 
+export function exportAllLogs(opts) {
+  return api.exportAllLogs(opts);
+}
+
 export function dbBackup() {
   return api.dbBackup();
 }
@@ -110,6 +150,10 @@ export function getSyncStatus() {
   return api.getSyncStatus();
 }
 
+export function syncNow() {
+  return api.syncNow();
+}
+
 export function checkHealth() {
   return api.checkHealth();
 }
@@ -124,8 +168,4 @@ export function searchCustomers(query) {
 
 export function fetchCompanyInfo() {
   return api.fetchCompanyInfo();
-}
-
-export function fetchBillTemplate() {
-  return api.fetchBillTemplate();
 }

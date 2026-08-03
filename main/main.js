@@ -1,19 +1,33 @@
-const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, Menu, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db/db');
 const { CsmsClient } = require('./services/wsClient');
 const syncWorker = require('./services/syncWorker');
 const { printBill } = require('./services/printService');
-const { renderBillHtml, setCachedTemplate } = require('./services/billTemplate');
+const { renderBillHtml } = require('./services/billTemplate');
 const escposPrinter = require('./services/escposPrinter');
 const bluetoothPrinter = require('./services/bluetoothPrinter');
 const { validateWsUrl } = require('./utils');
+const { hashPassword, verifyPassword } = require('./security');
+const recovery = require('./services/recovery');
+const apiAuth = require('./services/apiAuth');
+const billNumber = require('./services/billNumber');
+const { HEALTH_TIMEOUT_MS, PENDING_DRAIN_LIMIT, LOGS_DEFAULT_LIMIT } = require('./constants');
 
 let mainWindow;
 let csms;
 let connectionState = { connected: false, connecting: false, url: '', error: null };
+const isDev = !!process.env.VITE_DEV_SERVER_URL;
 const pendingCustomers = new Map(); // "chargerId:connectorId" -> customer object
+
+if (!isDev) {
+  console.log = () => {};
+  console.info = () => {};
+  console.warn = () => {};
+  console.error = () => {};
+  console.debug = () => {};
+}
 const prevConnectorStatus = new Map(); // "chargerId:connectorId" -> previous status
 
 function backendNotification(title, body) {
@@ -71,6 +85,7 @@ function emitCsmsEvent(evt) {
       });
     }
     if (evt.to === 'Faulted') {
+      recovery.flagFaulted(evt.charger_id, evt.connector_id);
       backendNotification(
         'Charger Fault',
         `Charger ${evt.charger_id} (connector ${evt.connector_id}) reported a fault${evt.error ? ': ' + evt.error : ''}.`
@@ -84,6 +99,10 @@ function emitCsmsEvent(evt) {
     }
   }
 
+  if (evt.type === 'connection_status' && evt.status === 'connected') {
+    drainPendingCommands();
+  }
+
   if (evt.type === 'connection_status' && evt.status === 'error') {
     backendNotification('Connection Error', evt.error || 'Failed to connect to CSMS.');
   }
@@ -91,6 +110,49 @@ function emitCsmsEvent(evt) {
   if (evt.type === 'bill_error') {
     backendNotification('Bill Error', `Failed to generate bill for charger ${evt.charger_id}: ${evt.error}`);
   }
+}
+
+function drainPendingCommands() {
+  if (!csms) return;
+  const raw = db.raw;
+  const rows = raw
+    .prepare(
+      `SELECT * FROM pending_commands WHERE status = 'pending' ORDER BY id ASC LIMIT ${PENDING_DRAIN_LIMIT}`
+    )
+    .all();
+  const now = new Date().toISOString();
+  for (const row of rows) {
+    const wsOpen = csms.ws && csms.ws.readyState === 1;
+    if (!wsOpen) break;
+    try {
+      csms.send(JSON.parse(row.payload));
+      raw
+        .prepare(`UPDATE pending_commands SET status='sent', updated_at=? WHERE id=?`)
+        .run(now, row.id);
+      broadcast('csms:event', {
+        type: 'command_queued_delivered',
+        command: row.action,
+        charger_id: row.charger_id,
+        connector_id: row.connector_id
+      });
+    } catch (e) {
+      raw
+        .prepare(`UPDATE pending_commands SET attempts=attempts+1, last_error=?, updated_at=? WHERE id=?`)
+        .run(String(e.message || e), now, row.id);
+    }
+  }
+}
+
+function queueCommand(payload) {
+  const raw = db.raw;
+  const now = new Date().toISOString();
+  const info = raw
+    .prepare(
+      `INSERT INTO pending_commands (charger_id, connector_id, action, payload, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(payload.charger_id, payload.connector_id, payload.action, JSON.stringify(payload), now);
+  return { queued: true, id: info.lastInsertRowid };
 }
 
 function createWindow() {
@@ -105,7 +167,17 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      devTools: false
+    }
+  });
+
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'F12' ||
+        (input.control && input.shift && input.key.toUpperCase() === 'I') ||
+        (input.control && input.shift && input.key.toUpperCase() === 'J')) {
+      event.preventDefault();
     }
   });
 
@@ -150,7 +222,8 @@ async function checkHealth(settings) {
   const url = base.replace(/\/$/, '') + path;
   const start = Date.now();
   try {
-    const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(5000) });
+    const headers = await apiAuth.authHeaders();
+    const res = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
     return { ok: res.ok, status: res.status, latency: Date.now() - start };
   } catch (err) {
     return { ok: false, reason: err.message, latency: Date.now() - start };
@@ -158,7 +231,15 @@ async function checkHealth(settings) {
 }
 
 app.whenReady().then(() => {
-  db.init();
+  const { integrity } = db.init();
+  recovery.setEventHandler((evt) => emitCsmsEvent(evt));
+  recovery.setMeterProvider((chargerId, connectorId) =>
+    csms ? csms.getMeterData(chargerId, connectorId) : null
+  );
+  // Close sessions that a crash/force-stop left hanging, using the logs.
+  recovery.recoverOnStartup();
+  recovery.start();
+  billNumber.ensure();
   const startupSettings = db.getSettings();
   csms = new CsmsClient((evt) => emitCsmsEvent(evt), {
     chargingRateMode: startupSettings.charging_rate_mode,
@@ -166,9 +247,14 @@ app.whenReady().then(() => {
     pendingCustomers
   });
 
+  if (integrity !== 'ok') {
+    backendNotification('Database Warning', `Local database integrity check failed: ${integrity}. Backup available in the app data folder.`);
+  }
+
   if (startupSettings.ws_url) tryConnectWs(startupSettings.ws_url);
 
   syncWorker.start();
+  Menu.setApplicationMenu(null);
   createWindow();
 
   // Startup health check
@@ -188,6 +274,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   syncWorker.stop();
+  recovery.stop();
   if (csms) csms.disconnect();
   bluetoothPrinter.cleanupBluetoothDaemons();
   if (process.platform !== 'darwin') app.quit();
@@ -198,9 +285,57 @@ app.on('window-all-closed', () => {
 ipcMain.handle('settings:get', () => db.getSettings());
 ipcMain.handle('connection:getStatus', () => connectionState);
 
+ipcMain.handle('clipboard:copy', () => { mainWindow?.webContents.copy(); });
+ipcMain.handle('clipboard:paste', () => { mainWindow?.webContents.paste(); });
+ipcMain.handle('clipboard:cut', () => { mainWindow?.webContents.cut(); });
+ipcMain.handle('clipboard:selectAll', () => { mainWindow?.webContents.selectAll(); });
+
+ipcMain.handle('share:saveImage', (_e, { data, name } = {}) => {
+  try {
+    if (!data) return { success: false, reason: 'no_data' };
+    const file = path.join(app.getPath('temp'), name || 'shared-image.png');
+    fs.writeFileSync(file, Buffer.from(data, 'base64'));
+    return { success: true, path: file };
+  } catch (err) {
+    return { success: false, reason: err.message };
+  }
+});
+
+ipcMain.handle('share:reveal', (_e, filePath) => {
+  try {
+    if (filePath) shell.showItemInFolder(filePath);
+    return { success: true };
+  } catch (err) {
+    return { success: false, reason: err.message };
+  }
+});
+
+ipcMain.handle('security:verify', (_e, password) => {
+  const stored = db.getSettings().security_password || '';
+  if (!stored) return { ok: true, reason: 'not_configured' };
+  return { ok: verifyPassword(password, stored) };
+});
+
 ipcMain.handle('settings:set', (_e, patch) => {
   const previous = db.getSettings();
-  const updated = db.setSettings(patch);
+  const next = { ...patch };
+  if (next.security_password != null) {
+    const pw = String(next.security_password);
+    const stored = previous.security_password || '';
+    if (pw === '') {
+      next.security_password = '';
+    } else if (pw !== stored || !pw.includes('$')) {
+      next.security_password = hashPassword(pw);
+    }
+  }
+  const updated = db.setSettings(next);
+  // Login credentials or endpoints changed: the cached token is invalid.
+  if (['api_login_endpoint', 'api_username', 'api_password', 'api_base_url', 'api_key'].some(
+    (k) => patch[k] != null && patch[k] !== previous[k]
+  )) {
+    apiAuth.clearToken();
+    billNumber.ensure();
+  }
   if (patch.charging_rate_mode != null || patch.default_battery_capacity_kwh != null) {
     csms.configure({
       chargingRateMode: updated.charging_rate_mode,
@@ -223,8 +358,8 @@ ipcMain.handle('settings:set', (_e, patch) => {
 
 ipcMain.handle('app:reset', (_e, { pin } = {}) => {
   const settings = db.getSettings();
-  if (!settings.pin_code) return { success: false, reason: 'pin_not_configured' };
-  if (!pin || pin !== settings.pin_code) return { success: false, reason: 'invalid_pin' };
+  if (!settings.security_password) return { success: false, reason: 'pin_not_configured' };
+  if (!verifyPassword(pin || '', settings.security_password)) return { success: false, reason: 'invalid_pin' };
   if (csms) {
     csms.disconnect();
     csms.clearLiveState();
@@ -297,26 +432,46 @@ ipcMain.handle('chargers:list', () => {
   }));
 });
 
-ipcMain.handle('logs:list', (_e, { chargerId, limit, offset } = {}) => {
+const LOG_SORT_COLUMNS = ['id', 'ts', 'charger_id', 'type', 'payload'];
+
+function buildLogWhere({ chargerId, query }) {
+  const where = [];
+  const params = [];
+  if (chargerId) {
+    where.push('charger_id = ?');
+    params.push(chargerId);
+  }
+  if (query && String(query).trim()) {
+    const q = `%${String(query).trim()}%`;
+    where.push('(charger_id LIKE ? OR type LIKE ? OR payload LIKE ?)');
+    params.push(q, q, q);
+  }
+  return { whereSql: where.length ? ` WHERE ${where.join(' AND ')}` : '', params };
+}
+
+function buildLogSort({ sortField, sortDir }) {
+  const field = LOG_SORT_COLUMNS.includes(sortField) ? sortField : 'id';
+  const dir = sortDir === 'asc' ? 'ASC' : 'DESC';
+  return ` ORDER BY ${field} ${dir}`;
+}
+
+ipcMain.handle('logs:list', (_e, { chargerId, limit, offset, query, sortField, sortDir } = {}) => {
   const raw = db.raw;
   const lim = limit || 50;
   const off = offset || 0;
-  if (chargerId) {
-    const { count } = raw.prepare("SELECT COUNT(*) as count FROM logs WHERE charger_id = ?").get(chargerId);
-    const rows = raw
-      .prepare('SELECT * FROM logs WHERE charger_id = ? ORDER BY id DESC LIMIT ? OFFSET ?')
-      .all(chargerId, lim, off);
-    return { rows, total: count };
-  }
-  const { count } = raw.prepare("SELECT COUNT(*) as count FROM logs").get();
-  const rows = raw.prepare('SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?').all(lim, off);
+  const { whereSql, params } = buildLogWhere({ chargerId, query });
+  const sortSql = buildLogSort({ sortField, sortDir });
+  const { count } = raw.prepare(`SELECT COUNT(*) as count FROM logs${whereSql}`).get(...params);
+  const rows = raw
+    .prepare(`SELECT * FROM logs${whereSql}${sortSql} LIMIT ? OFFSET ?`)
+    .all(...params, lim, off);
   return { rows, total: count };
 });
 
 ipcMain.handle('bills:list', (_e, { limit } = {}) =>
   db.raw
     .prepare('SELECT * FROM bills ORDER BY id DESC LIMIT ?')
-    .all(limit || 100)
+    .all(limit || LOGS_DEFAULT_LIMIT)
 );
 
 ipcMain.handle('bills:print', async (_e, { billId, deviceName } = {}) => {
@@ -336,7 +491,7 @@ ipcMain.handle('bills:print', async (_e, { billId, deviceName } = {}) => {
       if ((settings.thermal_print_mode || 'raster') === 'text') {
         result = await escposPrinter.printTextToNetwork(bill, tx, settings, ip, port);
       } else {
-        const html = renderBillHtml(bill, tx, settings, displayFormat);
+        const html = await renderBillHtmlWithServerDetails(bill, tx, settings, displayFormat);
         const dots = escposPrinter.targetDotsFromPaperWidth(settings.paper_width);
         result = await escposPrinter.printImageToNetwork(html, ip, port, dots);
       }
@@ -346,18 +501,18 @@ ipcMain.handle('bills:print', async (_e, { billId, deviceName } = {}) => {
       if ((settings.thermal_print_mode || 'raster') === 'text') {
         result = await escposPrinter.printTextToBluetooth(bill, tx, settings, addr);
       } else {
-        const html = renderBillHtml(bill, tx, settings, displayFormat);
+        const html = await renderBillHtmlWithServerDetails(bill, tx, settings, displayFormat);
         const dots = escposPrinter.targetDotsFromPaperWidth(settings.paper_width);
         result = await escposPrinter.printImageToBluetooth(html, addr, dots);
       }
     } else {
       // System/A4 printer: full-page HTML printing
-      const html = renderBillHtml(bill, tx, settings, displayFormat);
+      const html = await renderBillHtmlWithServerDetails(bill, tx, settings, displayFormat);
       result = await printBill(bill, html, deviceName);
     }
     return { ...result, bill: raw.prepare('SELECT * FROM bills WHERE id = ?').get(billId) };
   } catch (err) {
-    return { success: false, failureReason: err.message };
+    return { success: false, reason: err.message };
   }
 });
 
@@ -368,7 +523,7 @@ ipcMain.handle('bill:generatePdf', async (_e, arg) => {
   if (!bill) return { success: false, reason: 'bill_not_found' };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
-  const html = renderBillHtml(bill, tx, settings, settings.bill_display_format || 'professional');
+  const html = await renderBillHtmlWithServerDetails(bill, tx, settings, settings.bill_display_format || 'professional');
   const pdfWin = new BrowserWindow({
     show: false,
     webPreferences: { contextIsolation: true }
@@ -395,7 +550,7 @@ ipcMain.handle('bill:previewHtml', async (_e, arg) => {
   if (!bill) return { html: null, bill_number: null };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
-  const html = renderBillHtml(bill, tx, settings, settings.bill_display_format || 'professional', false);
+  const html = await renderBillHtmlWithServerDetails(bill, tx, settings, settings.bill_display_format || 'professional', false);
   return { html, bill_number: bill.bill_number };
 });
 
@@ -406,23 +561,49 @@ ipcMain.handle('bill:generateImage', async (_e, arg) => {
   if (!bill) return { success: false, reason: 'bill_not_found' };
   const tx = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(bill.transaction_id);
   const settings = db.getSettings();
-  const html = renderBillHtml(bill, tx, settings, settings.bill_display_format || 'professional');
+  const html = await renderBillHtmlWithServerDetails(bill, tx, settings, settings.bill_display_format || 'professional');
+  const VIEW_W = 1200;
+  const VIEW_H = 6000;
   const imgWin = new BrowserWindow({
-    show: false, width: 800, height: 800,
+    show: false, x: -32000, y: -32000,
+    width: VIEW_W, height: VIEW_H,
+    skipTaskbar: true,
     webPreferences: { contextIsolation: true }
   });
   try {
     await imgWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
-    await imgWin.webContents.executeJavaScript('document.fonts.ready');
-    const { width, height } = await imgWin.webContents.executeJavaScript(
-      `({ width: document.body.scrollWidth,
-          height: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) })`
-    );
-    imgWin.setContentBounds({ x: 0, y: 0, width: Math.ceil(width) + 2, height: Math.min(Math.ceil(height), 3000) });
-    await new Promise((r) => setTimeout(r, 150));
-    const image = await imgWin.webContents.capturePage();
-    const pngBuffer = image.toPNG();
-    return { success: true, data: pngBuffer.toString('base64'), name: `${bill.bill_number}.png` };
+    const rect = await imgWin.webContents.executeJavaScript(`(async () => {
+      const css = document.createElement('style');
+      css.textContent = '*::-webkit-scrollbar { display: none !important; } html, body { overflow: hidden !important; }';
+      document.head.appendChild(css);
+      await document.fonts.ready;
+      await new Promise(r => requestAnimationFrame(r));
+      const r = document.body.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    })()`);
+
+    let image = await imgWin.webContents.capturePage();
+    if (image.getSize().width < VIEW_W) {
+      imgWin.showInactive();
+      await imgWin.webContents.executeJavaScript('new Promise(r => requestAnimationFrame(r))');
+      image = await imgWin.webContents.capturePage();
+    }
+
+    const captured = image.getSize();
+    const crop = {
+      x: Math.max(0, Math.round(rect.x)),
+      y: Math.max(0, Math.round(rect.y)),
+      width: Math.round(Math.min(rect.w, VIEW_W - rect.x)),
+      height: Math.round(Math.min(rect.h, VIEW_H - rect.y))
+    };
+    const cropped = image.crop(crop);
+    const pngBuffer = cropped.toPNG();
+    return {
+      success: true,
+      data: pngBuffer.toString('base64'),
+      name: `${bill.bill_number}.png`,
+      meta: { rect, captured, cropped: cropped.getSize() }
+    };
   } catch (err) {
     return { success: false, reason: err.message };
   } finally {
@@ -431,6 +612,11 @@ ipcMain.handle('bill:generateImage', async (_e, arg) => {
 });
 
 ipcMain.handle('sync:status', () => syncWorker.getStatus());
+
+ipcMain.handle('sync:now', async () => {
+  try { await syncWorker.drainOnce(); } catch (e) { /* best effort */ }
+  return syncWorker.getStatus();
+});
 
 ipcMain.handle('health:check', async () => {
   return await checkHealth(db.getSettings());
@@ -457,16 +643,50 @@ ipcMain.handle('customer:search', async (_e, query) => {
   if (!base || !path || !query) return [];
   try {
     const url = base.replace(/\/$/, '') + path + '?q=' + encodeURIComponent(query);
-    const res = await fetch(url, {
-      headers: settings.api_key ? { Authorization: `Bearer ${settings.api_key}` } : {}
-    });
+    const headers = await apiAuth.authHeaders();
+    const res = await fetch(url, { headers });
     if (!res.ok) return [];
     return await res.json();
   } catch { return []; }
 });
 
-async function urlToBase64(url) {
+// Merge server-returned bill details over the local bill, whatever the shape.
+function mergeServerBillDetails(bill, details) {
+  if (!details || typeof details !== 'object') return bill;
+  const remote = details.bill && typeof details.bill === 'object'
+    ? details.bill
+    : details.data && typeof details.data === 'object'
+      ? details.data
+      : details;
+  return { ...bill, ...remote };
+}
+
+async function fetchBillDetailsFromServer(billNumber) {
+  const settings = db.getSettings();
+  const base = settings.api_base_url;
+  const path = settings.api_bill_details_endpoint;
+  if (!base || !path || !billNumber) return null;
   try {
+    const url = base.replace(/\/$/, '') + path + '?bill_number=' + encodeURIComponent(billNumber);
+    const headers = await apiAuth.authHeaders();
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data && typeof data === 'object') ? data : null;
+  } catch { return null; }
+}
+
+// Custom display format: fetch the bill from the server and render it with the
+// cached remote template. Falls back to the local row on any failure.
+async function renderBillHtmlWithServerDetails(bill, tx, settings, displayFormat, forPrint = true) {
+  if (displayFormat === 'custom' && settings.api_bill_details_endpoint) {
+    const details = await fetchBillDetailsFromServer(bill.bill_number);
+    if (details) return renderBillHtml(mergeServerBillDetails(bill, details), tx, settings, displayFormat, forPrint);
+  }
+  return renderBillHtml(bill, tx, settings, displayFormat, forPrint);
+}
+
+async function urlToBase64(url) {  try {
     const res = await fetch(url);
     if (!res.ok) return '';
     const buf = Buffer.from(await res.arrayBuffer());
@@ -483,43 +703,27 @@ ipcMain.handle('company:info', async () => {
   if (!base || !path) return null;
   try {
     const url = base.replace(/\/$/, '') + path;
-    const res = await fetch(url, {
-      headers: settings.api_key ? { Authorization: `Bearer ${settings.api_key}` } : {}
-    });
+    const headers = await apiAuth.authHeaders();
+    const res = await fetch(url, { headers });
     if (!res.ok) return null;
     const data = await res.json();
     if (data.branding_logo && !data.branding_logo.startsWith('data:')) data.branding_logo = await urlToBase64(data.branding_logo);
     if (data.invoice_logo && !data.invoice_logo.startsWith('data:')) data.invoice_logo = await urlToBase64(data.invoice_logo);
+    // The invoice prefix may come back as invoice_prefix, bill_prefix or prefix.
+    const prefix = data.invoice_prefix ?? data.bill_prefix ?? data.prefix;
+    if (prefix != null) data.bill_prefix = String(prefix);
     return data;
   } catch { return null; }
 });
 
-ipcMain.handle('bill:fetchTemplate', async () => {
-  const settings = db.getSettings();
-  const base = settings.api_base_url;
-  const path = settings.api_bill_format_endpoint;
-  if (!base || !path) return null;
-  try {
-    const url = base.replace(/\/$/, '') + path;
-    const res = await fetch(url, {
-      headers: settings.api_key ? { Authorization: `Bearer ${settings.api_key}` } : {}
-    });
-    if (!res.ok) return null;
-    const html = await res.text();
-    setCachedTemplate(html);
-    return html;
-  } catch { return null; }
-});
+// Fetch a bill's details from the server (bill number / id query parameter).
+ipcMain.handle('bill:details', (_e, billNumber) => fetchBillDetailsFromServer(billNumber));
 
 ipcMain.handle('printers:list', async () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     return await mainWindow.webContents.getPrintersAsync();
   }
   return [];
-});
-
-ipcMain.handle('printers:listCom', async () => {
-  return escposPrinter.listComPorts();
 });
 
 ipcMain.handle('printers:test', async (_e, { printerType, ip, port, comName } = {}) => {
@@ -538,7 +742,6 @@ ipcMain.handle('printers:test', async (_e, { printerType, ip, port, comName } = 
       if (!targetAddr) return { success: false, reason: 'Bluetooth printer not configured' };
       const payload = escposPrinter.buildTestPayload();
       const b64 = payload.toString('base64');
-      const bluetoothPrinter = require('./services/bluetoothPrinter');
       result = await bluetoothPrinter.sendToBluetooth(targetAddr, b64);
       if (!result.success) result.failureReason = result.failureReason || result.error || result.reason || 'Unknown error';
     } else {
@@ -592,6 +795,17 @@ ipcMain.handle('transactions:daily', (_e, { fromDate, toDate } = {}) => {
 });
 
 // ── CSV export ──
+function writeCsvFile(filePath, columns, rows) {
+  const header = columns.map((c) => `"${c}"`).join(',');
+  const lines = rows.map((row) =>
+    columns.map((c) => {
+      const v = row[c] != null ? String(row[c]).replace(/"/g, '""') : '';
+      return `"${v}"`;
+    }).join(',')
+  );
+  fs.writeFileSync(filePath, '\uFEFF' + header + '\n' + lines.join('\n'), 'utf8');
+}
+
 ipcMain.handle('export:csv', async (_e, { data, filename, columns }) => {
   if (!mainWindow || mainWindow.isDestroyed()) return { success: false, reason: 'no_window' };
   const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
@@ -600,14 +814,26 @@ ipcMain.handle('export:csv', async (_e, { data, filename, columns }) => {
   });
   if (canceled || !filePath) return { success: false, reason: 'canceled' };
   try {
-    const header = columns.map((c) => `"${c}"`).join(',');
-    const rows = data.map((row) =>
-      columns.map((c) => {
-        const v = row[c] != null ? String(row[c]).replace(/"/g, '""') : '';
-        return `"${v}"`;
-      }).join(',')
-    );
-    fs.writeFileSync(filePath, '\uFEFF' + header + '\n' + rows.join('\n'), 'utf8');
+    writeCsvFile(filePath, columns, data);
+    return { success: true, path: filePath };
+  } catch (err) {
+    return { success: false, reason: err.message };
+  }
+});
+
+ipcMain.handle('logs:exportAll', async (_e, { query } = {}) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return { success: false, reason: 'no_window' };
+  const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: 'all-logs.csv',
+    filters: [{ name: 'CSV', extensions: ['csv'] }]
+  });
+  if (canceled || !filePath) return { success: false, reason: 'canceled' };
+  try {
+    const { whereSql, params } = buildLogWhere({ query });
+    const rows = db.raw
+      .prepare(`SELECT id, ts, charger_id, type, payload FROM logs${whereSql} ORDER BY id DESC`)
+      .all(...params);
+    writeCsvFile(filePath, ['id', 'ts', 'charger_id', 'type', 'payload'], rows);
     return { success: true, path: filePath };
   } catch (err) {
     return { success: false, reason: err.message };
@@ -721,6 +947,33 @@ ipcMain.handle('csms:action', (_e, actionPayload) => {
     }
   }
 
+  const wsOpen = csms && csms.ws && csms.ws.readyState === 1;
+  if (!wsOpen) {
+    const queued = queueCommand(actionPayload);
+    broadcast('csms:event', {
+      type: 'command_queued',
+      command: action,
+      charger_id: chargerId,
+      connector_id: connectorId
+    });
+    return { sent: false, queued: true, ...queued };
+  }
+
   csms.send(actionPayload);
   return { sent: true };
 });
+
+ipcMain.handle('sessions:forceClose', (_e, txId) => {
+  const tx = db.raw.prepare('SELECT * FROM transactions WHERE id = ?').get(txId);
+  if (tx && tx.status === 'active') {
+    const wsOpen = csms && csms.ws && csms.ws.readyState === 1;
+    const payload = { charger_id: tx.charger_id, connector_id: tx.connector_id, action: 'STOP' };
+    if (wsOpen) csms.send(payload);
+    else queueCommand(payload);
+  }
+  return recovery.forceCloseSession(txId);
+});
+
+ipcMain.handle('sessions:retryBilling', (_e, txId) => recovery.retryBilling(txId));
+
+ipcMain.handle('sessions:attention', () => recovery.listAttention());
