@@ -111,56 +111,6 @@ export default function DashboardPage({ addToast, offlineConnectors }) {
         <p className="muted">Live overview of your charging network.</p>
       </header>
 
-      {/* Energy flow visualization */}
-      <div className="dash-energy-flow">
-        <svg viewBox="0 0 400 60" className="energy-flow-svg">
-          <defs>
-            <linearGradient id="flowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="var(--teal)" stopOpacity="0.8" />
-              <stop offset="100%" stopColor="var(--amber)" stopOpacity="0.8" />
-            </linearGradient>
-            <filter id="glow">
-              <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-              <feMerge>
-                <feMergeNode in="coloredBlur"/>
-                <feMergeNode in="SourceGraphic"/>
-              </feMerge>
-            </filter>
-          </defs>
-          {/* Grid icon */}
-          <rect x="8" y="10" width="40" height="40" rx="6" fill="var(--bg-raised)" stroke="var(--border-light)" strokeWidth="1.5" />
-          <line x1="20" y1="18" x2="20" y2="42" stroke="var(--teal)" strokeWidth="2" />
-          <line x1="36" y1="18" x2="36" y2="42" stroke="var(--teal)" strokeWidth="2" />
-          <line x1="20" y1="30" x2="36" y2="30" stroke="var(--teal)" strokeWidth="2" />
-          <text x="28" y="58" textAnchor="middle" fill="var(--text-muted)" fontSize="8" fontFamily="Inter, sans-serif">Grid</text>
-
-          {/* Flow particles */}
-          {chargingNow > 0 && [0, 1, 2].map((i) => (
-            <circle
-              key={i}
-              r="4"
-              fill="url(#flowGrad)"
-              filter="url(#glow)"
-              className="energy-particle"
-              style={{
-                animationDelay: `${i * 0.5}s`,
-                animationDuration: '1.5s',
-              }}
-            />
-          ))}
-
-          {/* Arrow line */}
-          <line x1="56" y1="30" x2="280" y2="30" stroke="var(--border-light)" strokeWidth="1" strokeDasharray="4 4" />
-
-          {/* Charger icon */}
-          <rect x="290" y="10" width="40" height="40" rx="6" fill="var(--bg-raised)" stroke="var(--border-light)" strokeWidth="1.5" />
-          <path d="M305 18v24M315 18v24M305 30h10" stroke={chargingNow > 0 ? 'var(--amber)' : 'var(--text-muted)'} strokeWidth="2" />
-          <text x="310" y="58" textAnchor="middle" fill="var(--text-muted)" fontSize="8" fontFamily="Inter, sans-serif">Chargers</text>
-
-
-        </svg>
-      </div>
-
       {/* Live charger cards */}
       {chargers.length > 0 && (
         <>

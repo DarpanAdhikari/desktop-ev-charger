@@ -310,7 +310,7 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
           const powerDeltaKw = meter?.power_delta_kw ?? delta.power ?? null;
           const powerLabel = powerNow != null
             ? powerDeltaKw != null && Math.abs(powerDeltaKw) >= 0.005
-              ? `${Number(powerNow).toFixed(2)} kW (\u0394 ${powerDeltaKw > 0 ? '+' : ''}${Number(powerDeltaKw).toFixed(2)})`
+              ? `${Number(powerNow).toFixed(2)} kW ( ${powerDeltaKw > 0 ? '+' : ''}${Number(powerDeltaKw).toFixed(2)})`
               : formatNullable(powerNow, 'kW')
             : '-';
           const hasLiveData = Number(meterValues.power ?? meter?.power_kw) > 0 || meterValues.voltage != null || meterValues.current != null || meter?.soc != null;
@@ -382,12 +382,12 @@ export default function ChargerDetailPage({ addToast, offlineConnectors }) {
                     <div className="connector-section-group">
                       <div className="section-group-label">Progress</div>
                       <div className="section-group-metrics">
-                        {delta.soc != null && <Metric icon={<IconTrendUp />} label="SoC \u0394" value={formatNullable(delta.soc, '%')} />}
-                        {delta.energy != null && <Metric icon={<IconTrendUp />} label="Energy \u0394" value={formatNullable(delta.energy, 'kWh')} />}
-                        {powerDeltaKw != null && <Metric icon={<IconTrendUp />} label="Power \u0394" value={formatNullable(powerDeltaKw, 'kW')} />}
+                        {delta.soc != null && <Metric icon={<IconTrendUp />} label="SoC &#x0394;" value={formatNullable(delta.soc, '%')} />}
+                        {delta.energy != null && <Metric icon={<IconTrendUp />} label="Energy &#x0394;" value={formatNullable(delta.energy, 'kWh')} />}
+                        {powerDeltaKw != null && <Metric icon={<IconTrendUp />} label="Power &#x0394;" value={formatNullable(powerDeltaKw, 'kW')} />}
                         {session.soc_start != null && session.soc_end != null && (
                           <span className="connector-metric" style={{ color: 'var(--text-secondary)', fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
-                            Session: {session.soc_start}% \u2192 {session.soc_end}%
+                            Session: {session.soc_start}% &#8594; {session.soc_end}%
                           </span>
                         )}
                       </div>
@@ -522,7 +522,7 @@ function eventDetail(e) {
   if (e.type === 'status_transition') {
     const from = p.from || '';
     const to = p.to || '';
-    return `Connector ${p.connector_id}: ${from} \u2192 ${to}${p.error ? ` (${p.error})` : ''}`;
+    return `Connector ${p.connector_id}: ${from} &#8594; ${to}${p.error ? ` (${p.error})` : ''}`;
   }
   if (e.type === 'charge_complete') {
     return connectorChargeCompleteText(p.connector_id);
