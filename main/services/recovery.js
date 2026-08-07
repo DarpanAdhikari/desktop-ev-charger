@@ -1,6 +1,6 @@
 let db = require('../db/db');
 let billing = require('./billing');
-const { RECOVERY_GRACE_SEC_DEFAULT, ATTENTION_CHECK_MS, PENDING_DRAIN_LIMIT } = require('../constants');
+const { RECOVERY_GRACE_SEC_DEFAULT, ATTENTION_CHECK_MS, PENDING_DRAIN_LIMIT, METER_RECONCILE_TOLERANCE_KWH } = require('../constants');
 
 let onEvent = () => {};
 let getLiveData = () => null;
@@ -41,6 +41,7 @@ function queueTransactionSync(txId) {
 }
 
 function toFinite(value) {
+  if (value == null || value === '') return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
 }
@@ -64,6 +65,10 @@ function sessionDataFromLogPayload(payload, connectorId) {
     socStart: toFinite(session.soc_start),
     socEnd: toFinite(session.soc_end)
   };
+  // Cumulative meter anchors: transaction_started carries the counter at
+  // session start (top-level energy), the stopped summary at session end.
+  if (payload.energy != null) data.meterStart = toFinite(payload.energy);
+  if (payload.summary && payload.summary.energy != null) data.meterEnd = toFinite(payload.summary.energy);
   const customer = {};
   for (const f of ['customer_id', 'customer_name', 'customer_pan', 'customer_address', 'customer_vehicle']) {
     const v = session[f] ?? payload[f];
@@ -118,6 +123,10 @@ function lastKnownSession(chargerId, connectorId, tx) {
     socEnd: toFinite(session.soc_end) ?? (logData && logData.socEnd) ?? toFinite(tx.soc_end),
     elapsed,
     customer: (logData && logData.customer) || null,
+    // Cumulative meter counter anchors: prefer the server's own values from
+    // the logs (started event / stopped summary), else the stored row values.
+    meterStart: (logData && logData.meterStart) ?? toFinite(tx.meter_energy_start_kwh),
+    meterEnd: (logData && logData.meterEnd) ?? null,
     // The server sends no absolute end time; derive it from the real start
     // plus the session duration instead of stamping the finalize moment.
     stoppedAt: elapsed != null && tx.started_at
@@ -138,16 +147,34 @@ function finalizeTransaction(tx, reason, opts = {}) {
       ? new Date(new Date(tx.started_at).getTime() + known.elapsed * 1000).toISOString()
       : nowIso()
   );
-  // Keep the meter range self-consistent: end - start must equal the billed
+  // Meter window: prefer the server's own counters (start from the
+  // transaction_started payload, end from the stopped summary) when available;
+  // otherwise keep the range self-consistent so end - start equals the billed
   // energy even if the final meter readings were missed.
-  const meterEnd = tx.meter_energy_start_kwh != null && known.energy != null
-    ? tx.meter_energy_start_kwh + known.energy
-    : null;
+  const knownStart = known.meterStart != null ? known.meterStart : toFinite(tx.meter_energy_start_kwh);
+  const knownEnd = known.meterEnd != null ? known.meterEnd : null;
+  let meterStart = knownStart;
+  let meterEnd = knownEnd;
+  if (meterEnd == null && meterStart != null && known.energy != null) {
+    meterEnd = meterStart + known.energy;
+  } else if (meterStart == null && meterEnd != null && known.energy != null) {
+    meterStart = meterEnd - known.energy;
+  }
+  let flagged = opts.flagged ? 1 : 0;
+  let flagReason = opts.flagged ? (opts.flagReason || reason) : null;
+  if (meterStart != null && meterEnd != null && known.energy != null &&
+      Math.abs(meterEnd - meterStart - known.energy) > METER_RECONCILE_TOLERANCE_KWH) {
+    // The counters contradict the billed energy: surface the discrepancy for
+    // operator verification instead of printing a bill from bad readings.
+    flagged = 1;
+    flagReason = 'meter_mismatch';
+  }
   const customer = known.customer || {};
 
   raw
     .prepare(
       `UPDATE transactions SET stopped_at=?, duration_sec=?, energy_kwh=?, soc_start=?, soc_end=?,
+         meter_energy_start_kwh=COALESCE(?, meter_energy_start_kwh),
          meter_energy_end_kwh=?,
          customer_id=COALESCE(?, customer_id),
          customer_name=COALESCE(?, customer_name),
@@ -162,14 +189,15 @@ function finalizeTransaction(tx, reason, opts = {}) {
       known.energy,
       known.socStart,
       known.socEnd,
+      meterStart,
       meterEnd,
       customer.customer_id != null ? customer.customer_id : null,
       customer.customer_name != null ? customer.customer_name : null,
       customer.customer_pan != null ? customer.customer_pan : null,
       customer.customer_address != null ? customer.customer_address : null,
       customer.customer_vehicle != null ? customer.customer_vehicle : null,
-      opts.flagged ? 1 : 0,
-      opts.flagged ? opts.flagReason || reason : null,
+      flagged,
+      flagReason,
       tx.id
     );
 
@@ -397,7 +425,9 @@ function recoverOnStartup() {
           elapsed: toFinite(summary.duration_sec) ?? toFinite(tx.duration_sec),
           socStart: toFinite(summary.soc_start) ?? toFinite(tx.soc_start),
           socEnd: toFinite(summary.soc_end) ?? toFinite(tx.soc_end),
-          customer
+          customer,
+          // The stopped summary carries the cumulative counter at stop.
+          meterEnd: toFinite(summary.energy)
         },
         emitType: 'session_recovered'
       });

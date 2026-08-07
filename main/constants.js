@@ -23,6 +23,12 @@ const SYNC_LOG_RETENTION_DAYS = 30;
 const PENDING_DRAIN_LIMIT = 50;
 const LOGS_DEFAULT_LIMIT = 100;
 
+// ---------- Meter / billing reconciliation ----------
+// How much meter counter drift (kWh) is tolerated between the server's
+// cumulative counters (transaction_started.energy / summary.energy) and the
+// billed session energy before a transaction is flagged meter_mismatch.
+const METER_RECONCILE_TOLERANCE_KWH = 0.05;
+
 // ---------- Defaults ----------
 const RECOVERY_GRACE_SEC_DEFAULT = '120';
 
@@ -47,4 +53,5 @@ module.exports = {
   BT_HEALTH_INTERVAL_MS,
   BT_PNP_QUERY_TIMEOUT_MS,
   PROC_KILL_GRACE_MS,
+  METER_RECONCILE_TOLERANCE_KWH,
 };

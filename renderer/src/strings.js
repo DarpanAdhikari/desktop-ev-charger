@@ -17,6 +17,7 @@ export function humanReason(reason) {
     case 'connector_fault': return 'the connector reported a fault';
     case 'resumed_after_outage': return 'the session resumed after a power loss';
     case 'missing_soc': return 'the stop summary was missing SoC data';
+    case 'meter_mismatch': return 'the meter counter did not match the billed energy';
     case 'server_session_closed': return 'the server closed the session';
     case 'force_closed': return 'closed by operator';
     default: return reason || 'unknown reason';

@@ -392,4 +392,95 @@ describe('Recovery', () => {
       expect(updated.flag_reason).toBe('connector_fault');
     });
   });
+
+  describe('meter anchors', () => {
+    function seedLog(ts, type, payload) {
+      raw
+        .prepare('INSERT INTO logs (ts, charger_id, type, payload) VALUES (?, ?, ?, ?)')
+        .run(ts, payload.charger_id || 'CHG-1', type, JSON.stringify(payload));
+    }
+
+    it('keeps the meter window self-consistent from the anchored start and last energy', () => {
+      seedCharger();
+      seedConnector('CHG-1', 1, 'Available');
+      const tx = seedActiveTx('CHG-1', 1, 100, 9.99);
+      raw
+        .prepare('UPDATE transactions SET meter_energy_start_kwh = ? WHERE id = ?')
+        .run(12000, tx.id);
+      seedLog(new Date(Date.now() - 10 * 60 * 1000).toISOString(), 'meter', {
+        type: 'meter', charger_id: 'CHG-1', connector_id: 1, transaction_id: 100,
+        session: { elapsed_sec: 900, energy: 4.5, soc_start: 20, soc_end: 70 },
+      });
+
+      recovery.reconcileFromSnapshot({
+        charger_id: 'CHG-1',
+        connectors: { '1': { status: 'Available', transaction: null } },
+      });
+
+      const updated = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(tx.id);
+      expect(updated.status).toBe('stopped');
+      expect(updated.meter_energy_start_kwh).toBe(12000);
+      expect(updated.meter_energy_end_kwh).toBe(12004.5);
+      expect(updated.flagged).toBe(0);
+    });
+
+    it('uses the stopped summary counter as the authoritative meter end', () => {
+      seedCharger();
+      seedConnector('CHG-1', 1, 'Available');
+      const tx = seedActiveTx('CHG-1', 1, 100, 9.99);
+      raw
+        .prepare('UPDATE transactions SET meter_energy_start_kwh = ? WHERE id = ?')
+        .run(12000, tx.id);
+      seedLog(new Date().toISOString(), 'transaction_stopped', {
+        type: 'transaction_stopped', charger_id: 'CHG-1', connector_id: 1, transaction_id: 100,
+        summary: { duration_sec: 500, energy_kwh: 2.0, energy: 12002, soc_start: 30, soc_end: 55 },
+      });
+
+      recovery.recoverOnStartup();
+
+      const updated = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(tx.id);
+      expect(updated.status).toBe('stopped');
+      expect(updated.meter_energy_end_kwh).toBe(12002);
+      expect(updated.energy_kwh).toBe(2.0);
+      expect(updated.flagged).toBe(0);
+    });
+
+    it('derives a missing start from the stopped summary counter minus billed energy', () => {
+      seedCharger();
+      seedConnector('CHG-1', 1, 'Available');
+      const tx = seedActiveTx('CHG-1', 1, 100, 9.99);
+      seedLog(new Date().toISOString(), 'transaction_stopped', {
+        type: 'transaction_stopped', charger_id: 'CHG-1', connector_id: 1, transaction_id: 100,
+        summary: { duration_sec: 500, energy_kwh: 2.0, energy: 12002, soc_start: 30, soc_end: 55 },
+      });
+
+      recovery.recoverOnStartup();
+
+      const updated = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(tx.id);
+      expect(updated.meter_energy_start_kwh).toBe(12000);
+      expect(updated.meter_energy_end_kwh).toBe(12002);
+    });
+
+    it('flags meter_mismatch when the summary counter contradicts the billed energy', () => {
+      seedCharger();
+      seedConnector('CHG-1', 1, 'Available');
+      const tx = seedActiveTx('CHG-1', 1, 100, 9.99);
+      raw
+        .prepare('UPDATE transactions SET meter_energy_start_kwh = ? WHERE id = ?')
+        .run(12000, tx.id);
+      seedLog(new Date().toISOString(), 'transaction_stopped', {
+        type: 'transaction_stopped', charger_id: 'CHG-1', connector_id: 1, transaction_id: 100,
+        summary: { duration_sec: 500, energy_kwh: 2.0, energy: 12050, soc_start: 30, soc_end: 55 },
+      });
+
+      recovery.recoverOnStartup();
+
+      const updated = raw.prepare('SELECT * FROM transactions WHERE id = ?').get(tx.id);
+      expect(updated.status).toBe('stopped');
+      expect(updated.meter_energy_end_kwh).toBe(12050);
+      expect(updated.energy_kwh).toBe(2.0);
+      expect(updated.flagged).toBe(1);
+      expect(updated.flag_reason).toBe('meter_mismatch');
+    });
+  });
 });

@@ -104,6 +104,7 @@ function runMigrations() {
     try { db.exec(sql); } catch (e) { /* column may already exist */ }
   }
   backfillTransactionTimes();
+  backfillMeterAnchorsFromLogs();
   const missingKeys = {
     branding_logo: '',
     invoice_logo: '',
@@ -312,6 +313,78 @@ function backfillTransactionTimes() {
         serverData,
         tx.id
       );
+    }
+    upsertMarker.run(marker, new Date().toISOString());
+  });
+  try {
+    run();
+  } catch (e) { /* backfill failure is non-fatal */ }
+}
+
+// Fill meter-counter anchors for sessions that predate the server sending
+// energy on transaction_started. Only rows with no start anchor are touched -
+// already-anchored receipts stay as printed. The server's own counters win
+// when the logs carry them (started event top-level energy = counter at
+// session start, stopped summary energy = counter at stop); otherwise keep
+// the self-consistent start + billed window.
+function backfillMeterAnchorsFromLogs() {
+  const marker = 'backfill_tx_meter_anchors_v1';
+  const done = db.prepare('SELECT value FROM settings WHERE key = ?').get(marker);
+  if (done) return;
+
+  const toFinite = (v) => {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const upsertMarker = db
+    .prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+
+  const startedLog = db.prepare(
+    `SELECT payload FROM logs WHERE charger_id = ? AND type = 'transaction_started'
+       AND json_extract(payload, '$.connector_id') = ?
+       AND json_extract(payload, '$.transaction_id') = ? ORDER BY ts DESC, id DESC LIMIT 1`
+  );
+  const stoppedLog = db.prepare(
+    `SELECT payload FROM logs WHERE charger_id = ? AND type = 'transaction_stopped'
+       AND json_extract(payload, '$.connector_id') = ?
+       AND json_extract(payload, '$.transaction_id') = ? ORDER BY ts DESC, id DESC LIMIT 1`
+  );
+  const updateTx = db.prepare(
+    'UPDATE transactions SET meter_energy_start_kwh = ?, meter_energy_end_kwh = ? WHERE id = ?'
+  );
+
+  const rows = db
+    .prepare(
+      `SELECT id, charger_id, connector_id, ocpp_tx_id, energy_kwh
+       FROM transactions WHERE status = 'stopped' AND meter_energy_start_kwh IS NULL`
+    )
+    .all();
+
+  const run = db.transaction(() => {
+    for (const tx of rows) {
+      if (tx.charger_id == null || tx.connector_id == null || tx.ocpp_tx_id == null) continue;
+      let start = null;
+      let end = null;
+      const startedRow = startedLog.get(tx.charger_id, tx.connector_id, tx.ocpp_tx_id);
+      if (startedRow) {
+        try {
+          const payload = JSON.parse(startedRow.payload);
+          start = toFinite(payload && payload.energy);
+        } catch (e) { /* ignore malformed payload */ }
+      }
+      const stoppedRow = stoppedLog.get(tx.charger_id, tx.connector_id, tx.ocpp_tx_id);
+      if (stoppedRow) {
+        try {
+          const payload = JSON.parse(stoppedRow.payload);
+          end = toFinite(payload && payload.summary && payload.summary.energy);
+        } catch (e) { /* ignore malformed payload */ }
+      }
+      const billed = toFinite(tx.energy_kwh);
+      if (start == null && end != null && billed != null) start = end - billed;
+      if (end == null && start != null && billed != null) end = start + billed;
+      if (start == null && end == null) continue;
+      updateTx.run(start, end, tx.id);
     }
     upsertMarker.run(marker, new Date().toISOString());
   });

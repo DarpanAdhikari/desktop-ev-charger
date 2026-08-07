@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const db = require('../db/db');
 const { generateBillForTransaction, findShiftForTime } = require('./billing');
 const recovery = require('./recovery');
-const { RECONNECT_DELAY_MS } = require('../constants');
+const { RECONNECT_DELAY_MS, METER_RECONCILE_TOLERANCE_KWH } = require('../constants');
 
 class CsmsClient {
   constructor(onEvent, options = {}) {
@@ -155,16 +155,21 @@ class CsmsClient {
             this.pendingCustomers.delete(key);
           }
         }
+        // The server's transaction_started carries the cumulative meter
+        // counter at session start (evt.energy). Anchor it here; the meter
+        // handler only fills it when it is still NULL (see below).
+        const startMeterKwh = toFiniteNumber(evt.energy);
         raw
           .prepare(
             `INSERT INTO transactions (charger_id, connector_id, ocpp_tx_id, started_at, status,
-              customer_id, customer_name, customer_pan, customer_address, customer_vehicle, server_data)
+              customer_id, customer_name, customer_pan, customer_address, customer_vehicle, server_data,
+              meter_energy_start_kwh)
              VALUES (?, ?, ?, ?, 'active',
-              ?, ?, ?, ?, ?, ?)`
+              ?, ?, ?, ?, ?, ?, ?)`
           )
           .run(chargerId, evt.connector_id, evt.transaction_id, now,
             customerId, customerName, customerPan, customerAddress, customerVehicle,
-            JSON.stringify(evt));
+            JSON.stringify(evt), startMeterKwh);
         break;
       }
 
@@ -386,14 +391,38 @@ class CsmsClient {
               ...(hasSoc ? [summarySocStart, summarySocEnd] : []),
               tx.id
             );
-          // Keep the meter range self-consistent: end - start must equal the
-          // billed energy even if the final meter readings were missed.
+          // Meter window: the server's summary carries the authoritative
+          // cumulative counter at stop (summary.energy); prefer it over the
+          // derived value. Derive a missing start from end - billed (and
+          // missing end from start + billed) so the receipt always reconciles.
+          // If the counters contradict the billed energy beyond rounding, the
+          // session was mis-measured - flag for operator verification rather
+          // than silently billing from inconsistent readings.
           const billedEnergy = toFiniteNumber(summary.energy_kwh);
+          const summaryMeterEndKwh = toFiniteNumber(summary.energy);
           const meterStartKwh = toFiniteNumber(tx.meter_energy_start_kwh);
-          if (meterStartKwh != null && billedEnergy != null) {
+          let meterStartFinal = meterStartKwh;
+          let meterEndFinal = summaryMeterEndKwh;
+          if (meterEndFinal == null) {
+            if (meterStartFinal != null && billedEnergy != null) {
+              meterEndFinal = meterStartFinal + billedEnergy;
+            }
+          } else if (meterStartFinal == null && billedEnergy != null) {
+            meterStartFinal = meterEndFinal - billedEnergy;
+          }
+          if (meterStartFinal != null || meterEndFinal != null) {
+            if (meterStartFinal != null && meterEndFinal != null && billedEnergy != null &&
+                Math.abs(meterEndFinal - meterStartFinal - billedEnergy) > METER_RECONCILE_TOLERANCE_KWH) {
+              raw
+                .prepare("UPDATE transactions SET flagged = 1, flag_reason = ? WHERE id = ? AND flagged = 0")
+                .run('meter_mismatch', tx.id);
+            }
             raw
-              .prepare('UPDATE transactions SET meter_energy_end_kwh = ? WHERE id = ?')
-              .run(meterStartKwh + billedEnergy, tx.id);
+              .prepare(
+                `UPDATE transactions SET meter_energy_start_kwh = COALESCE(?, meter_energy_start_kwh),
+                   meter_energy_end_kwh = ? WHERE id = ?`
+              )
+              .run(meterStartFinal, meterEndFinal, tx.id);
           }
           // Keep the full stopped payload (summary etc.) with the session.
           raw.prepare('UPDATE transactions SET server_data = ? WHERE id = ?')
@@ -521,6 +550,7 @@ class CsmsClient {
 }
 
 function toFiniteNumber(value) {
+  if (value == null || value === '') return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
 }
